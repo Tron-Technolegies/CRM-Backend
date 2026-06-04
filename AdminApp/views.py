@@ -3,7 +3,7 @@ from django.shortcuts import render
 from rest_framework.decorators import api_view
 
 
-from AdminApp.models import Deal, Lead
+from AdminApp.models import Customer, Deal, Lead, Staff, Task
 
 # ..............lead.......................
 @api_view(['POST'])
@@ -197,3 +197,265 @@ def delete_deal(request, id):
     data = Deal.objects.get(id=id)
     data.delete()
     return JsonResponse({"message": "successfully deleted"})
+
+
+
+# ...................customer...................
+@api_view(['POST'])
+def add_customer(request):
+    company_name = request.data.get("company_name")
+    contact_name = request.data.get("contact_name")
+    phone_number = request.data.get("phone_number")
+    email = request.data.get("email")
+    industry = request.data.get("industry")
+    status = request.data.get("status")
+    lifetime_value = request.data.get("lifetime_value")
+
+    if not company_name or not contact_name or not phone_number:
+        return HttpResponse(
+            "Company name, contact name and phone number are mandatory fields",
+            status=400
+        )
+
+    try:
+        Customer.objects.create(
+            company_name=company_name,
+            contact_name=contact_name,
+            phone_number=phone_number,
+            email=email,
+            industry=industry,
+            status=status,
+            lifetime_value=lifetime_value,
+        )
+
+        return HttpResponse("Customer created successfully", status=201)
+
+    except Exception as e:
+        return HttpResponse(str(e), status=500)
+
+
+
+@api_view(['GET'])
+def view_customers(request):
+    customers = Customer.objects.all()
+    data = []
+
+    for i in customers:
+        data.append(
+            {
+                "id": i.id,
+                "company_name": i.company_name,
+                "contact_name": i.contact_name,
+                "phone_number": i.phone_number,
+                "email": i.email,
+                "industry": i.industry,
+                "status": i.status,
+                "lifetime_value": i.lifetime_value,
+                "created_at": i.created_at,
+                "updated_at": i.updated_at,
+            }
+        )
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['PUT'])
+def update_customer(request, id):
+    try:
+        customer = Customer.objects.get(id=id)
+    except Customer.DoesNotExist:
+        return HttpResponse("Customer not found", status=404)
+
+    customer.company_name = request.data.get("company_name") or customer.company_name
+    customer.contact_name = request.data.get("contact_name") or customer.contact_name
+    customer.phone_number = request.data.get("phone_number") or customer.phone_number
+    customer.email = request.data.get("email") or customer.email
+    customer.industry = request.data.get("industry") or customer.industry
+    customer.status = request.data.get("status") or customer.status
+    customer.lifetime_value = request.data.get("lifetime_value") or customer.lifetime_value
+
+    try:
+        customer.save()
+        return HttpResponse("Customer updated successfully", status=200)
+
+    except Exception as e:
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['DELETE'])
+def delete_customer(request, id):
+    customer = Customer.objects.get(id=id)
+    customer.delete()
+    return JsonResponse({"message": "Customer deleted successfully"})
+
+
+
+# .................task..................
+@api_view(['POST'])
+def add_task(request):
+    title = request.data.get("title")
+    description = request.data.get("description")
+    assigned_to = request.data.get("assigned_to")
+    related_to = request.data.get("related_to")
+    priority = request.data.get("priority")
+    status = request.data.get("status")
+    due_date = request.data.get("due_date")
+
+    if not title or not assigned_to or not due_date:
+        return HttpResponse(
+            "Title, assigned_to and due_date are mandatory fields",
+            status=400
+        )
+
+    try:
+        Task.objects.create(
+            title=title,
+            description=description,
+            assigned_to=assigned_to,
+            related_to=related_to,
+            priority=priority,
+            status=status,
+            due_date=due_date,
+        )
+
+        return HttpResponse("Task created successfully", status=201)
+
+    except Exception as e:
+        return HttpResponse(str(e), status=500)
+    
+
+
+@api_view(['GET'])
+def view_tasks(request):
+    tasks = Task.objects.all()
+    data = []
+
+    for i in tasks:
+        data.append(
+            {
+                "id": i.id,
+                "title": i.title,
+                "description": i.description,
+                "assigned_to": i.assigned_to,
+                "related_to": i.related_to,
+                "priority": i.priority,
+                "status": i.status,
+                "due_date": i.due_date,
+                "created_at": i.created_at,
+                "updated_at": i.updated_at,
+            }
+        )
+
+    return JsonResponse(data, safe=False)
+
+
+
+@api_view(['PUT'])
+def update_task(request, id):
+    try:
+        task = Task.objects.get(id=id)
+
+    except Task.DoesNotExist:
+        return HttpResponse("Task not found", status=404)
+
+    task.title = request.data.get("title") or task.title
+    task.description = request.data.get("description") or task.description
+    task.assigned_to = request.data.get("assigned_to") or task.assigned_to
+    task.related_to = request.data.get("related_to") or task.related_to
+    task.priority = request.data.get("priority") or task.priority
+    task.status = request.data.get("status") or task.status
+    task.due_date = request.data.get("due_date") or task.due_date
+
+    try:
+        task.save()
+        return HttpResponse("Task updated successfully", status=200)
+
+    except Exception as e:
+        return HttpResponse(str(e), status=500)
+    
+
+
+@api_view(['DELETE'])
+def delete_task(request, id):
+        task = Task.objects.get(id=id)
+        task.delete()
+        return JsonResponse({"message": "Task deleted successfully"})
+
+
+
+# ............staff(user)...............
+@api_view(['POST'])
+def add_staff(request):
+    full_name = request.data.get("full_name")
+    email = request.data.get("email")
+    role = request.data.get("role")
+    department = request.data.get("department")
+
+    if not full_name or not email or not role:
+        return HttpResponse(
+            "Full name, email and role are mandatory fields",
+            status=400
+        )
+
+    try:
+        Staff.objects.create(
+            full_name=full_name,
+            email=email,
+            role=role,
+            department=department,
+        )
+
+        return HttpResponse("Staff created successfully", status=201)
+
+    except Exception as e:
+        return HttpResponse(str(e), status=500)
+    
+
+
+@api_view(['GET'])
+def view_staff(request):
+    staffs = Staff.objects.all()
+    data = []
+
+    for i in staffs:
+        data.append(
+            {
+                "id": i.id,
+                "full_name": i.full_name,
+                "email": i.email,
+                "role": i.role,
+                "department": i.department,
+                "is_invited": i.is_invited,
+                "invited_at": i.invited_at,
+            }
+        )
+
+    return JsonResponse(data, safe=False)
+
+
+
+@api_view(['PUT'])
+def update_staff(request, id):
+    try:
+        staff = Staff.objects.get(id=id)
+    except Staff.DoesNotExist:
+        return HttpResponse("Staff not found", status=404)
+
+    staff.full_name = request.data.get("full_name") or staff.full_name
+    staff.email = request.data.get("email") or staff.email
+    staff.role = request.data.get("role") or staff.role
+    staff.department = request.data.get("department") or staff.department
+
+    try:
+        staff.save()
+        return HttpResponse("Staff updated successfully", status=200)
+    except Exception as e:
+        return HttpResponse(str(e), status=500)
+    
+
+
+@api_view(['DELETE'])
+def delete_staff(request, id):
+    staff = Staff.objects.get(id=id)
+    staff.delete()
+    return JsonResponse({"message": "Staff deleted successfully"})
