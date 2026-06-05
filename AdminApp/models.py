@@ -1,6 +1,28 @@
 from django.db import models
 
 
+
+class Staff(models.Model):
+    ROLE_CHOICES = [
+        ("admin", "Admin"),
+        ("manager", "Manager"),
+        ("sales agent", "Sales agent"),
+        ("support agent", "Support agent"),
+    ]
+
+    full_name = models.CharField(max_length=100)
+    email = models.EmailField(unique=True)
+    role = models.CharField(max_length=50, choices=ROLE_CHOICES)
+    department = models.CharField(max_length=100)
+
+    is_invited = models.BooleanField(default=True)
+    invited_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.full_name
+    
+
+
 class Lead(models.Model):
 
     SOURCE_CHOICES = [
@@ -17,21 +39,13 @@ class Lead(models.Model):
     ]
 
     full_name = models.CharField(max_length=255)
-
     phone_number = models.CharField(max_length=20)
-
     email = models.EmailField(blank=True, null=True)
-
     company_name = models.CharField(max_length=255)
-
     lead_source = models.CharField( max_length=50, choices=SOURCE_CHOICES, default="Website")
-
-    assigned_to = models.CharField(max_length=255)
-
+    assigned_to = models.ForeignKey( Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="leads")
     priority = models.CharField( max_length=20, choices=PRIORITY_CHOICES, default="Medium")
-
     expected_closing_date = models.DateField( blank=True, null=True)
-
     lead_description = models.TextField( blank=True, null=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -67,21 +81,13 @@ class Deal(models.Model):
     ]
 
     deal_name = models.CharField(max_length=255)
-
     company_name = models.CharField(max_length=255)
-
     deal_amount = models.DecimalField( max_digits=12, decimal_places=2, default=0 )
-
     stage = models.CharField( max_length=50, choices=STAGE_CHOICES, default="Discussion" )
-
-    assigned_to = models.CharField(max_length=255)
-
+    assigned_to = models.ForeignKey( Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="deals")
     expected_close_date = models.DateField( blank=True, null=True )
-
     deal_source = models.CharField( max_length=50, choices=SOURCE_CHOICES, default="Website" )
-
     priority = models.CharField( max_length=20, choices=PRIORITY_CHOICES, default="Medium" )
-    
     deal_description = models.TextField( blank=True, null=True )
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -129,7 +135,7 @@ class Task(models.Model):
 
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True, null=True)
-    assigned_to = models.CharField(max_length=255)
+    assigned_to = models.ForeignKey( Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="tasks")
     related_to = models.CharField( max_length=255, blank=True, null=True, help_text="e.g. Deal: Website Redesign")
     priority = models.CharField( max_length=10, choices=PRIORITY_CHOICES)
     status = models.CharField( max_length=20, choices=STATUS_CHOICES, default="pending")
@@ -140,24 +146,3 @@ class Task(models.Model):
 
     def __str__(self):
         return self.title
-    
-
-
-class Staff(models.Model):
-    ROLE_CHOICES = [
-        ("admin", "Admin"),
-        ("manager", "Manager"),
-        ("sales agent", "Sales agent"),
-        ("support agent", "Support agent"),
-    ]
-
-    full_name = models.CharField(max_length=100)
-    email = models.EmailField(unique=True)
-    role = models.CharField(max_length=50, choices=ROLE_CHOICES)
-    department = models.CharField(max_length=100)
-
-    is_invited = models.BooleanField(default=True)
-    invited_at = models.DateTimeField(auto_now_add=True)
-
-    def __str__(self):
-        return self.full_name

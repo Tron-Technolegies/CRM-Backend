@@ -1,6 +1,7 @@
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render
 from rest_framework.decorators import api_view
+from django.db.models import Sum
 
 
 from AdminApp.models import Customer, Deal, Lead, Staff, Task
@@ -459,3 +460,33 @@ def delete_staff(request, id):
     staff = Staff.objects.get(id=id)
     staff.delete()
     return JsonResponse({"message": "Staff deleted successfully"})
+
+
+
+# ............report.............
+@api_view(['GET'])
+def report_view(request):
+
+    total_leads = Lead.objects.count()
+    total_customers = Customer.objects.count()
+    total_tasks = Task.objects.count()
+    total_staff = Staff.objects.count()
+    active_customers = Customer.objects.filter(status="active").count()
+    pending_tasks = Task.objects.filter(status="pending").count()
+    completed_tasks = Task.objects.filter(status="completed").count()
+    high_priority_tasks = Task.objects.filter(priority="high").count()
+    total_revenue = Customer.objects.aggregate(total=Sum("lifetime_value"))["total"] or 0
+
+    report = {
+        "total_leads": total_leads,
+        "total_customers": total_customers,
+        "total_tasks": total_tasks,
+        "total_staff": total_staff,
+        "active_customers": active_customers,
+        "pending_tasks": pending_tasks,
+        "completed_tasks": completed_tasks,
+        "high_priority_tasks": high_priority_tasks,
+        "total_revenue": float(total_revenue)
+    }
+
+    return JsonResponse(report)
