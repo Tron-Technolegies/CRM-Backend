@@ -15,7 +15,7 @@ class Staff(models.Model):
     role = models.CharField(max_length=50, choices=ROLE_CHOICES)
     department = models.CharField(max_length=100)
 
-    is_invited = models.BooleanField(default=True)
+    is_invited = models.BooleanField(default=False)
     invited_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -38,6 +38,13 @@ class Lead(models.Model):
         ("High", "High"),
     ]
 
+    STATUS_CHOICES = [
+        ("new", "New"),
+        ("contacted", "Contacted"),
+        ("converted", "Converted"),
+        ("lost", "Lost"),
+    ]
+
     full_name = models.CharField(max_length=255)
     phone_number = models.CharField(max_length=20)
     email = models.EmailField(blank=True, null=True)
@@ -47,6 +54,9 @@ class Lead(models.Model):
     priority = models.CharField( max_length=20, choices=PRIORITY_CHOICES, default="Medium")
     expected_closing_date = models.DateField( blank=True, null=True)
     lead_description = models.TextField( blank=True, null=True)
+
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="new")
+    converted_at = models.DateTimeField(blank=True, null=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -90,8 +100,41 @@ class Deal(models.Model):
     priority = models.CharField( max_length=20, choices=PRIORITY_CHOICES, default="Medium" )
     deal_description = models.TextField( blank=True, null=True )
 
+    lead = models.ForeignKey(Lead, on_delete=models.SET_NULL, null=True, blank=True, related_name="deals")
+    customer = models.ForeignKey("Customer", on_delete=models.SET_NULL, null=True, blank=True, related_name="deals")
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        # Auto-create or link Customer when Deal is marked Won
+        if self.stage == "Won" and self.customer is None:
+            customer, created = Customer.objects.get_or_create(
+                company_name=self.company_name,
+                defaults={
+                    "contact_name": self.lead.full_name if self.lead else "",
+                    "phone_number": self.lead.phone_number if self.lead else "",
+                    "email": self.lead.email if self.lead else None,
+                    "industry": "",
+                    "status": "active",
+                    "lifetime_value": self.deal_amount,
+                },
+            )
+            if not created:
+                # Add deal amount to existing customer's lifetime value
+                customer.lifetime_value += self.deal_amount
+                customer.save()
+    
+            self.customer = customer
+
+            # Mark the originating lead as converted
+            if self.lead and self.lead.status != "converted":
+                from django.utils import timezone
+                self.lead.status = "converted"
+                self.lead.converted_at = timezone.now()
+                self.lead.save()
+
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.deal_name

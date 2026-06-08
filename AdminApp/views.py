@@ -1,3 +1,4 @@
+from django.utils import timezone
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render
 from rest_framework.decorators import api_view
@@ -32,7 +33,7 @@ def add_lead(request):
             email=email,
             company_name=company_name,
             lead_source=lead_source,
-            assigned_to=assigned_to,
+            assigned_to_id=assigned_to,
             priority=priority,
             expected_closing_date=expected_closing_date,
             lead_description=lead_description,
@@ -59,7 +60,7 @@ def view_leads(request):
                 "email": i.email,
                 "comp_name": i.company_name,
                 "lead_src": i.lead_source,
-                "assigned_to": i.assigned_to,
+                "assigned_to": i.assigned_to_id,
                 "priority": i.priority,
                 "exp_closing_date": i.expected_closing_date,
                 "lead_dcr": i.lead_description,
@@ -104,6 +105,7 @@ def delete_lead(request, id):
 
 
 # ...............deal....................
+# ............ add lead id in add deal ..............
 @api_view(['POST'])
 def add_deal(request):
     deal_name = request.data.get("deal_name")
@@ -115,6 +117,7 @@ def add_deal(request):
     deal_source = request.data.get("deal_source")
     priority = request.data.get("priority")
     deal_description = request.data.get("deal_description")
+    lead_id = request.data.get("lead_id")          # ← optional lead link
 
     if not deal_name or not company_name:
         return HttpResponse(
@@ -122,18 +125,33 @@ def add_deal(request):
             status=400
         )
 
+    # fetch lead if lead_id is provided
+    lead = None
+    if lead_id:
+        try:
+            lead = Lead.objects.get(id=lead_id)
+        except Lead.DoesNotExist:
+            return HttpResponse("Lead not found", status=404)
+
     try:
         Deal.objects.create(
             deal_name=deal_name,
             company_name=company_name,
             deal_amount=deal_amount,
             stage=stage,
-            assigned_to=assigned_to,
+            assigned_to_id=assigned_to,
             expected_close_date=expected_close_date,
             deal_source=deal_source,
             priority=priority,
             deal_description=deal_description,
+            lead=lead,                              # 🔗 link lead if provided
         )
+
+        # mark lead as converted if linked
+        if lead:
+            lead.status = "converted"
+            lead.converted_at = timezone.now()
+            lead.save()
 
         return HttpResponse("Deal created successfully", status=201)
 
@@ -155,7 +173,7 @@ def view_deals(request):
                 "company_name": i.company_name,
                 "deal_amount": i.deal_amount,
                 "stage": i.stage,
-                "assigned_to": i.assigned_to,
+                "assigned_to": i.assigned_to_id, 
                 "expected_close_date": i.expected_close_date,
                 "deal_source": i.deal_source,
                 "priority": i.priority,
@@ -337,7 +355,7 @@ def view_tasks(request):
                 "id": i.id,
                 "title": i.title,
                 "description": i.description,
-                "assigned_to": i.assigned_to,
+                "assigned_to": i.assigned_to_id,
                 "related_to": i.related_to,
                 "priority": i.priority,
                 "status": i.status,
@@ -444,8 +462,6 @@ def update_staff(request, id):
 
     staff.full_name = request.data.get("full_name") or staff.full_name
     staff.email = request.data.get("email") or staff.email
-    staff.role = request.data.get("role") or staff.role
-    staff.department = request.data.get("department") or staff.department
 
     try:
         staff.save()
@@ -490,3 +506,40 @@ def report_view(request):
     }
 
     return JsonResponse(report)
+
+
+
+# ......... convert lead to deal through button ...........
+@api_view(['GET'])
+def convert_lead_to_deal(request, lead_id):
+    try:
+        lead = Lead.objects.get(id=lead_id)
+    except Lead.DoesNotExist:
+        return HttpResponse("Lead not found", status=404)
+
+    if lead.status == "converted":
+        return HttpResponse("Lead already converted", status=400)
+
+    prefilled_data = {
+        "deal_name": f"{lead.company_name} Deal",
+        "company_name": lead.company_name,
+        "deal_source": lead.lead_source,
+        "priority": lead.priority,
+        "assigned_to": lead.assigned_to_id,
+        "expected_close_date": lead.expected_closing_date,
+        "lead_id": lead.id,
+    }
+
+    return JsonResponse(prefilled_data, status=200)
+# ............ unconverted lead show in dropdown ........
+@api_view(['GET'])
+def get_unconverted_leads(request):
+    leads = Lead.objects.exclude(status="converted")
+    data = []
+    for lead in leads:
+        data.append({
+            "id": lead.id,
+            "full_name": lead.full_name,
+            "company_name": lead.company_name,
+        })
+    return JsonResponse(data, safe=False)
