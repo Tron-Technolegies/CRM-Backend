@@ -15,7 +15,7 @@ def add_lead(request):
     email = request.data.get("email")
     company_name = request.data.get("company_name")
     lead_source = request.data.get("lead_source")
-    assigned_to = request.data.get("assigned_to")
+    # assigned_to = request.data.get("assigned_to")
     priority = request.data.get("priority")
     expected_closing_date = request.data.get("expected_closing_date")
     lead_description = request.data.get("lead_description")
@@ -33,7 +33,8 @@ def add_lead(request):
             email=email,
             company_name=company_name,
             lead_source=lead_source,
-            assigned_to_id=assigned_to,
+            # assigned_to_id=assigned_to,
+            assigned_to=None,
             priority=priority,
             expected_closing_date=expected_closing_date,
             lead_description=lead_description,
@@ -42,13 +43,14 @@ def add_lead(request):
         return HttpResponse("Lead created successfully", status=201)
 
     except Exception as e:
+        print("ADD LEAD ERROR:", str(e))
         return HttpResponse(str(e), status=500)
 
 
 
 @api_view(['GET'])
 def view_leads(request):
-    leads = Lead.objects.all()
+    leads = Lead.objects.all().order_by('-updated_at')
     list = []
 
     for i in leads:
@@ -56,16 +58,16 @@ def view_leads(request):
             {
                 "id": i.id,
                 "name": i.full_name,
-                "ph_number": i.phone_number,
+                "phone": i.phone_number,
                 "email": i.email,
-                "comp_name": i.company_name,
-                "lead_src": i.lead_source,
-                "assigned_to": i.assigned_to_id,
+                "companyName": i.company_name,
+                "source": i.lead_source,
+                "assignedTo": str(i.assigned_to) if i.assigned_to else "—",
+                "status": i.get_status_display(),
                 "priority": i.priority,
-                "exp_closing_date": i.expected_closing_date,
-                "lead_dcr": i.lead_description,
-                "created_at": i.created_at,
-                "updated_at": i.updated_at
+                "description": i.lead_description,
+                "dateAdded": i.created_at.strftime("%b %d, %Y") if i.created_at else "—",
+                "createdAt": i.created_at.isoformat() if i.created_at else None,
             }
         )
     return JsonResponse(list, safe=False)
@@ -74,9 +76,11 @@ def view_leads(request):
 
 @api_view(['PUT'])
 def update_lead(request, id):
+    print("UPDATE DATA:", request.data)
     try:
         lead = Lead.objects.get(id=id)
     except Lead.DoesNotExist:
+        print("UPDATE ERROR:", str(e))
         return HttpResponse("Lead not found", status=404)
 
     lead.full_name = request.data.get("full_name") or lead.full_name
@@ -86,6 +90,7 @@ def update_lead(request, id):
     lead.lead_source = request.data.get("lead_source") or lead.lead_source
     lead.assigned_to = request.data.get("assigned_to") or lead.assigned_to
     lead.priority = request.data.get("priority") or lead.priority
+    lead.status = request.data.get("status") or lead.status
     lead.expected_closing_date = request.data.get("expected_closing_date") or lead.expected_closing_date
     lead.lead_description = request.data.get("lead_description") or lead.lead_description
 

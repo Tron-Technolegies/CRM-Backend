@@ -27,9 +27,10 @@ class Lead(models.Model):
 
     SOURCE_CHOICES = [
         ("Website", "Website"),
-        ("Ads", "Ads"),
-        ("Referral", "Referral"),
         ("WhatsApp", "WhatsApp"),
+        ("Facebook Ads", "Facebook Ads"),
+        ("Google Ads", "Google Ads"),
+        ("Referral", "Referral"),
     ]
 
     PRIORITY_CHOICES = [
