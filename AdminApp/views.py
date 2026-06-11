@@ -167,26 +167,23 @@ def add_deal(request):
 
 @api_view(['GET'])
 def view_deals(request):
-    deals = Deal.objects.all()
+    deals = Deal.objects.all().order_by('-updated_at')
     list = []
 
     for i in deals:
-        list.append(
-            {
-                "id": i.id,
-                "deal_name": i.deal_name,
-                "company_name": i.company_name,
-                "deal_amount": i.deal_amount,
-                "stage": i.stage,
-                "assigned_to": i.assigned_to_id, 
-                "expected_close_date": i.expected_close_date,
-                "deal_source": i.deal_source,
-                "priority": i.priority,
-                "deal_description": i.deal_description,
-                "created_at": i.created_at,
-                "updated_at": i.updated_at
-            }
-        )
+        list.append({
+            "id": i.id,
+            "name": i.deal_name,
+            "company_name": i.company_name,
+            "stage": i.stage,
+            "value": float(i.deal_amount) if i.deal_amount else 0,
+            "expectedCloseDate": str(i.expected_close_date) if i.expected_close_date else "—",
+            "assignedTo": str(i.assigned_to) if i.assigned_to else "—",
+            "source": i.deal_source,
+            "priority": i.priority,
+            "description": i.deal_description,
+            "createdAt": i.created_at.isoformat() if i.created_at else None,
+        })
     return JsonResponse(list, safe=False)
 
 
@@ -234,6 +231,7 @@ def add_customer(request):
     industry = request.data.get("industry")
     status = request.data.get("status")
     lifetime_value = request.data.get("lifetime_value")
+    deal_id = request.data.get("deal_id")
 
     if not company_name or not contact_name or not phone_number:
         return HttpResponse(
@@ -241,8 +239,15 @@ def add_customer(request):
             status=400
         )
 
+    deal = None
+    if deal_id:
+        try:
+            deal = Deal.objects.get(id=deal_id)
+        except Deal.DoesNotExist:
+            return HttpResponse("Deal not found", status=404)
+
     try:
-        Customer.objects.create(
+        customer = Customer.objects.create(
             company_name=company_name,
             contact_name=contact_name,
             phone_number=phone_number,
@@ -251,6 +256,11 @@ def add_customer(request):
             status=status,
             lifetime_value=lifetime_value,
         )
+
+        if deal:
+            deal.stage = "Won"
+            deal.customer = customer
+            deal.save()
 
         return HttpResponse("Customer created successfully", status=201)
 
@@ -261,24 +271,22 @@ def add_customer(request):
 
 @api_view(['GET'])
 def view_customers(request):
-    customers = Customer.objects.all()
+    customers = Customer.objects.all().order_by('-updated_at')
     data = []
 
     for i in customers:
-        data.append(
-            {
+        data.append({
                 "id": i.id,
-                "company_name": i.company_name,
-                "contact_name": i.contact_name,
-                "phone_number": i.phone_number,
+                "companyName": i.company_name,
+                "contactName": i.contact_name,
+                "phone": i.phone_number,
                 "email": i.email,
                 "industry": i.industry,
-                "status": i.status,
-                "lifetime_value": i.lifetime_value,
-                "created_at": i.created_at,
-                "updated_at": i.updated_at,
-            }
-        )
+                "status": i.get_status_display(),
+                "lifetimeValue": float(i.lifetime_value) if i.lifetime_value else 0,
+                "joinDate": i.created_at.strftime("%Y-%m-%d") if i.created_at else "—",
+                "createdAt": i.created_at.isoformat() if i.created_at else None,
+            })
 
     return JsonResponse(data, safe=False)
 
@@ -325,23 +333,28 @@ def add_task(request):
     status = request.data.get("status")
     due_date = request.data.get("due_date")
 
-    if not title or not assigned_to or not due_date:
-        return HttpResponse(
-            "Title, assigned_to and due_date are mandatory fields",
-            status=400
-        )
+    if not title or not due_date:
+        return HttpResponse("Title and due_date are mandatory fields", status=400)
+
+    # normalize status
+    status_map = {
+        "pending": "pending",
+        "in progress": "in_progress",
+        "in_progress": "in_progress",
+        "completed": "completed",
+    }
+    status = status_map.get(status.lower() if status else "pending", "pending")
 
     try:
         Task.objects.create(
             title=title,
             description=description,
-            assigned_to=assigned_to,
+            assigned_to=None,
             related_to=related_to,
             priority=priority,
             status=status,
             due_date=due_date,
         )
-
         return HttpResponse("Task created successfully", status=201)
 
     except Exception as e:
@@ -351,24 +364,21 @@ def add_task(request):
 
 @api_view(['GET'])
 def view_tasks(request):
-    tasks = Task.objects.all()
+    tasks = Task.objects.all().order_by('-updated_at')
     data = []
 
     for i in tasks:
-        data.append(
-            {
-                "id": i.id,
-                "title": i.title,
-                "description": i.description,
-                "assigned_to": i.assigned_to_id,
-                "related_to": i.related_to,
-                "priority": i.priority,
-                "status": i.status,
-                "due_date": i.due_date,
-                "created_at": i.created_at,
-                "updated_at": i.updated_at,
-            }
-        )
+        data.append({
+            "id": i.id,
+            "title": i.title,
+            "description": i.description,
+            "assignedTo": str(i.assigned_to) if i.assigned_to else "—",
+            "relatedTo": i.related_to,
+            "priority": i.priority,
+            "status": i.status,
+            "dueDate": str(i.due_date) if i.due_date else None,
+            "createdAt": i.created_at.isoformat() if i.created_at else None,
+        })
 
     return JsonResponse(data, safe=False)
 
@@ -489,6 +499,7 @@ def delete_staff(request, id):
 def report_view(request):
 
     total_leads = Lead.objects.count()
+    total_deals = Deal.objects.count()
     total_customers = Customer.objects.count()
     total_tasks = Task.objects.count()
     total_staff = Staff.objects.count()
@@ -497,9 +508,11 @@ def report_view(request):
     completed_tasks = Task.objects.filter(status="completed").count()
     high_priority_tasks = Task.objects.filter(priority="high").count()
     total_revenue = Customer.objects.aggregate(total=Sum("lifetime_value"))["total"] or 0
+    total_deals = Deal.objects.count()
 
     report = {
         "total_leads": total_leads,
+        "total_deals": total_deals,
         "total_customers": total_customers,
         "total_tasks": total_tasks,
         "total_staff": total_staff,
@@ -507,7 +520,8 @@ def report_view(request):
         "pending_tasks": pending_tasks,
         "completed_tasks": completed_tasks,
         "high_priority_tasks": high_priority_tasks,
-        "total_revenue": float(total_revenue)
+        "total_revenue": float(total_revenue),
+        "total_deals": total_deals,
     }
 
     return JsonResponse(report)
@@ -544,7 +558,51 @@ def get_unconverted_leads(request):
     for lead in leads:
         data.append({
             "id": lead.id,
-            "full_name": lead.full_name,
+            "name": lead.full_name,
             "company_name": lead.company_name,
+            "source": lead.lead_source,
         })
     return JsonResponse(data, safe=False)
+# ............ connect the deal to customer ..............
+@api_view(['GET'])
+def get_linkable_deals(request):
+    deals = Deal.objects.exclude(stage="Won")
+    return JsonResponse([
+        {
+            "id": d.id,
+            "name": d.deal_name,
+            "company_name": d.company_name,
+            "contact_name": d.lead.full_name if d.lead else "",
+            "phone": d.lead.phone_number if d.lead else "",
+            "email": d.lead.email if d.lead else "",
+        }
+        for d in deals
+    ], safe=False)
+
+
+# ......... view total leads ...........
+@api_view(['GET'])
+def leads_by_source(request):
+    from django.db.models import Count
+    sources = Lead.objects.values('lead_source').annotate(count=Count('id'))
+    total = Lead.objects.count()
+    
+    colors = {
+        "Website": "#3B82F6",
+        "WhatsApp": "#10B981",
+        "Facebook Ads": "#8B5CF6",
+        "Google Ads": "#F59E0B",
+        "Referral": "#64748B",
+        "Ads": "#F97316",
+    }
+
+    data = [
+        {
+            "name": s['lead_source'],
+            "value": round((s['count'] / total) * 100) if total > 0 else 0,
+            "color": colors.get(s['lead_source'], "#64748B"),
+        }
+        for s in sources
+    ]
+
+    return JsonResponse({"data": data, "total": total})

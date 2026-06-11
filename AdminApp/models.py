@@ -83,6 +83,8 @@ class Deal(models.Model):
         ("Ads", "Ads"),
         ("Referral", "Referral"),
         ("WhatsApp", "WhatsApp"),
+        ("Google Ads", "Google Ads"),
+        ("Facebook Ads", "Facebook Ads"),
     ]
 
     PRIORITY_CHOICES = [

@@ -31,4 +31,7 @@ urlpatterns= [
 
     path('leads/<int:lead_id>/convert/', views.convert_lead_to_deal, name='lead-to-deal'),
     path('leads/unconverted/', views.get_unconverted_leads, name='unconverted-leads'),
+    path('deals/linkable/', views.get_linkable_deals, name='linkable-deals'),
+
+    path('leads/by-source/', views.leads_by_source, name='leads-by-source'),
 ]
