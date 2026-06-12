@@ -3,6 +3,8 @@ from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render
 from rest_framework.decorators import api_view
 from django.db.models import Sum
+from django.db.models.functions import TruncWeek
+from django.db.models import Count
 
 
 from AdminApp.models import Customer, Deal, Lead, Staff, Task
@@ -437,6 +439,7 @@ def add_staff(request):
             email=email,
             role=role,
             department=department,
+            is_invited=True,
         )
 
         return HttpResponse("Staff created successfully", status=201)
@@ -448,24 +451,21 @@ def add_staff(request):
 
 @api_view(['GET'])
 def view_staff(request):
-    staffs = Staff.objects.all()
+    staffs = Staff.objects.all().order_by('-invited_at')
     data = []
 
     for i in staffs:
-        data.append(
-            {
-                "id": i.id,
-                "full_name": i.full_name,
-                "email": i.email,
-                "role": i.role,
-                "department": i.department,
-                "is_invited": i.is_invited,
-                "invited_at": i.invited_at,
-            }
-        )
+        data.append({
+            "id": i.id,
+            "fullName": i.full_name,
+            "email": i.email,
+            "role": i.role,
+            "department": i.department,
+            "status": "Invited" if i.is_invited else "Active",
+            "invitedAt": i.invited_at.isoformat() if i.invited_at else None,
+        })
 
     return JsonResponse(data, safe=False)
-
 
 
 @api_view(['PUT'])
@@ -508,7 +508,47 @@ def report_view(request):
     completed_tasks = Task.objects.filter(status="completed").count()
     high_priority_tasks = Task.objects.filter(priority="high").count()
     total_revenue = Customer.objects.aggregate(total=Sum("lifetime_value"))["total"] or 0
-    total_deals = Deal.objects.count()
+
+    # Revenue grouped by week
+    revenue_over_time_qs = (
+        Customer.objects
+        .annotate(week=TruncWeek("created_at"))
+        .values("week")
+        .annotate(total=Sum("lifetime_value"))
+        .order_by("week")
+    )
+
+    revenue_over_time = [
+        {
+            "date": entry["week"].strftime("%b %d"),
+            "revenue": float(entry["total"] or 0),
+        }
+        for entry in revenue_over_time_qs
+    ]
+
+    # Leads grouped by status
+    leads_by_status_qs = (
+        Lead.objects
+        .values("status")
+        .annotate(count=Count("id"))
+    )
+    leads_by_status = {entry["status"]: entry["count"] for entry in leads_by_status_qs}
+
+    # Deals grouped by stage
+    deals_by_stage_qs = (
+        Deal.objects
+        .values("stage")
+        .annotate(count=Count("id"))
+    )
+    deals_by_stage = {entry["stage"]: entry["count"] for entry in deals_by_stage_qs}
+
+    # Leads grouped by source
+    leads_by_source_qs = (
+        Lead.objects
+        .values("lead_source")
+        .annotate(count=Count("id"))
+    )
+    leads_by_source = {entry["lead_source"]: entry["count"] for entry in leads_by_source_qs}
 
     report = {
         "total_leads": total_leads,
@@ -521,11 +561,13 @@ def report_view(request):
         "completed_tasks": completed_tasks,
         "high_priority_tasks": high_priority_tasks,
         "total_revenue": float(total_revenue),
-        "total_deals": total_deals,
+        "revenue_over_time": revenue_over_time,
+        "leads_by_status": leads_by_status,
+        "deals_by_stage": deals_by_stage,
+        "leads_by_source": leads_by_source,
     }
 
     return JsonResponse(report)
-
 
 
 # ......... convert lead to deal through button ...........
