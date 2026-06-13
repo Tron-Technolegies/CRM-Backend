@@ -495,60 +495,67 @@ def delete_staff(request, id):
 
 
 # ............report.............
+from datetime import datetime
+
 @api_view(['GET'])
 def report_view(request):
+    start_date = request.GET.get("start_date")
+    end_date = request.GET.get("end_date")
 
-    total_leads = Lead.objects.count()
-    total_deals = Deal.objects.count()
-    total_customers = Customer.objects.count()
-    total_tasks = Task.objects.count()
+    leads_qs = Lead.objects.all()
+    deals_qs = Deal.objects.all()
+    customers_qs = Customer.objects.all()
+    tasks_qs = Task.objects.all()
+
+    if start_date and end_date:
+        leads_qs = leads_qs.filter(created_at__date__range=[start_date, end_date])
+        deals_qs = deals_qs.filter(created_at__date__range=[start_date, end_date])
+        customers_qs = customers_qs.filter(created_at__date__range=[start_date, end_date])
+        tasks_qs = tasks_qs.filter(created_at__date__range=[start_date, end_date])
+
+    total_leads = leads_qs.count()
+    total_deals = deals_qs.count()
+    total_customers = customers_qs.count()
+    total_tasks = tasks_qs.count()
     total_staff = Staff.objects.count()
-    active_customers = Customer.objects.filter(status="active").count()
-    pending_tasks = Task.objects.filter(status="pending").count()
-    completed_tasks = Task.objects.filter(status="completed").count()
-    high_priority_tasks = Task.objects.filter(priority="high").count()
-    total_revenue = Customer.objects.aggregate(total=Sum("lifetime_value"))["total"] or 0
+    active_customers = customers_qs.filter(status="active").count()
+    pending_tasks = tasks_qs.filter(status="pending").count()
+    completed_tasks = tasks_qs.filter(status="completed").count()
+    high_priority_tasks = tasks_qs.filter(priority="high").count()
+    total_revenue = customers_qs.aggregate(total=Sum("lifetime_value"))["total"] or 0
 
-    # Revenue grouped by week
     revenue_over_time_qs = (
-        Customer.objects
+        customers_qs
         .annotate(week=TruncWeek("created_at"))
         .values("week")
         .annotate(total=Sum("lifetime_value"))
         .order_by("week")
     )
-
     revenue_over_time = [
-        {
-            "date": entry["week"].strftime("%b %d"),
-            "revenue": float(entry["total"] or 0),
-        }
+        {"date": entry["week"].strftime("%b %d"), "revenue": float(entry["total"] or 0)}
         for entry in revenue_over_time_qs
     ]
 
-    # Leads grouped by status
-    leads_by_status_qs = (
-        Lead.objects
-        .values("status")
-        .annotate(count=Count("id"))
-    )
+    leads_by_status_qs = leads_qs.values("status").annotate(count=Count("id"))
     leads_by_status = {entry["status"]: entry["count"] for entry in leads_by_status_qs}
 
-    # Deals grouped by stage
-    deals_by_stage_qs = (
-        Deal.objects
-        .values("stage")
-        .annotate(count=Count("id"))
-    )
+    deals_by_stage_qs = deals_qs.values("stage").annotate(count=Count("id"))
     deals_by_stage = {entry["stage"]: entry["count"] for entry in deals_by_stage_qs}
 
-    # Leads grouped by source
-    leads_by_source_qs = (
-        Lead.objects
-        .values("lead_source")
-        .annotate(count=Count("id"))
-    )
+    leads_by_source_qs = leads_qs.values("lead_source").annotate(count=Count("id"))
     leads_by_source = {entry["lead_source"]: entry["count"] for entry in leads_by_source_qs}
+
+    leads_over_time_qs = (
+        leads_qs
+        .annotate(week=TruncWeek("created_at"))
+        .values("week")
+        .annotate(count=Count("id"))
+        .order_by("week")
+    )
+    leads_over_time = [
+        {"name": entry["week"].strftime("%b %d"), "value": entry["count"]}
+        for entry in leads_over_time_qs
+    ]
 
     report = {
         "total_leads": total_leads,
@@ -565,9 +572,11 @@ def report_view(request):
         "leads_by_status": leads_by_status,
         "deals_by_stage": deals_by_stage,
         "leads_by_source": leads_by_source,
+        "leads_over_time": leads_over_time,
     }
 
     return JsonResponse(report)
+
 
 
 # ......... convert lead to deal through button ...........
