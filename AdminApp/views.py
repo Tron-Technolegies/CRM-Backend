@@ -1,6 +1,6 @@
 from django.utils import timezone
 from django.http import HttpResponse, JsonResponse
-from django.shortcuts import render
+from django.shortcuts import get_object_or_404, render
 from rest_framework.decorators import api_view
 from django.db.models import Sum
 from django.db.models.functions import TruncWeek
@@ -73,6 +73,29 @@ def view_leads(request):
             }
         )
     return JsonResponse(list, safe=False)
+
+
+
+@api_view(['GET'])
+def view_single_lead(request, id):
+    lead = get_object_or_404(Lead, id=id)
+    
+    data = {
+                "id": lead.id,
+                "name": lead.full_name,
+                "phone": lead.phone_number,
+                "email": lead.email,
+                "companyName": lead.company_name,
+                "source": lead.lead_source,
+                "assignedTo": str(lead.assigned_to) if lead.assigned_to else "—",
+                "status": lead.get_status_display(),
+                "priority": lead.priority,
+                "description": lead.lead_description,
+                "dateAdded": lead.created_at.strftime("%b %d, %Y") if lead.created_at else "—",
+                "createdAt": lead.created_at.isoformat() if lead.created_at else None,
+            }
+    
+    return JsonResponse(data, safe=False)
     
 
 
@@ -190,6 +213,27 @@ def view_deals(request):
 
 
 
+@api_view(['GET'])
+def view_single_deals(request, id):
+    deal = get_object_or_404(Deal, id=id)
+
+    data = {
+                "id": deal.id,
+                "name": deal.deal_name,
+                "company_name": deal.company_name,
+                "stage": deal.stage,
+                "value": float(deal.deal_amount) if deal.deal_amount else 0,
+                "expectedCloseDate": str(deal.expected_close_date) if deal.expected_close_date else "—",
+                "assignedTo": str(deal.assigned_to) if deal.assigned_to else "—",
+                "source": deal.deal_source,
+                "priority": deal.priority,
+                "description": deal.deal_description,
+                "createdAt": deal.created_at.isoformat() if deal.created_at else None,
+            }
+    return JsonResponse(data, safe=False)
+
+
+
 @api_view(['PUT'])
 def update_deal(request, id):
     try:
@@ -293,6 +337,27 @@ def view_customers(request):
     return JsonResponse(data, safe=False)
 
 
+
+@api_view(['GET'])
+def view_single_customer(request, id):
+    customer = get_object_or_404(Customer, id=id)
+
+    data = {
+                "id": customer.id,
+                "companyName": customer.company_name,
+                "contactName": customer.contact_name,
+                "phone": customer.phone_number,
+                "email": customer.email,
+                "industry": customer.industry,
+                "status": customer.get_status_display(),
+                "lifetimeValue": float(customer.lifetime_value) if customer.lifetime_value else 0,
+                "joinDate": customer.created_at.strftime("%Y-%m-%d") if customer.created_at else "—",
+                "createdAt": customer.created_at.isoformat() if customer.created_at else None,
+            }
+
+    return JsonResponse(data, safe=False)
+
+
 @api_view(['PUT'])
 def update_customer(request, id):
     try:
@@ -386,6 +451,26 @@ def view_tasks(request):
 
 
 
+@api_view(['GET'])
+def view_single_task(request, id):
+    task = get_object_or_404(Task, id=id)
+
+    data = {
+                "id": task.id,
+                "title": task.title,
+                "description": task.description,
+                "assignedTo": str(task.assigned_to) if task.assigned_to else "—",
+                "relatedTo": task.related_to,
+                "priority": task.priority,
+                "status": task.status,
+                "dueDate": str(task.due_date) if task.due_date else None,
+                "createdAt": task.created_at.isoformat() if task.created_at else None,
+            }
+
+    return JsonResponse(data, safe=False)
+
+
+
 @api_view(['PUT'])
 def update_task(request, id):
     try:
@@ -464,6 +549,24 @@ def view_staff(request):
             "status": "Invited" if i.is_invited else "Active",
             "invitedAt": i.invited_at.isoformat() if i.invited_at else None,
         })
+
+    return JsonResponse(data, safe=False)
+
+
+
+@api_view(['GET'])
+def view_single_staff(request, id):
+    staff = get_object_or_404(Staff, id=id)
+
+    data = {
+                "id": staff.id,
+                "fullName": staff.full_name,
+                "email": staff.email,
+                "role": staff.role,
+                "department": staff.department,
+                "status": "Invited" if staff.is_invited else "Active",
+                "invitedAt": staff.invited_at.isoformat() if staff.invited_at else None,
+            }
 
     return JsonResponse(data, safe=False)
 

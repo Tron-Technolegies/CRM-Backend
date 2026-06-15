@@ -4,26 +4,31 @@ from AdminApp import views
 urlpatterns= [
     path('lead/add/', views.add_lead, name='lead-add'),
     path('lead/view/', views.view_leads, name='lead-view'),
+    path('lead/single/view/<int:id>/', views.view_single_lead, name='view-single-lead'),
     path('lead/update/<int:id>/', views.update_lead, name='lead-update'),
     path('lead/delete/<int:id>/', views.delete_lead, name='lead-delete'),
 
     path('deal/add/', views.add_deal, name='deal-add'),
     path('deal/view/', views.view_deals, name='deal-view'),
+    path('deal/single/view/<int:id>/', views.view_single_deals, name='view-single-deals'),
     path('deal/update/<int:id>/', views.update_deal, name='deal-update'),
     path('deal/delete/<int:id>/', views.delete_deal, name='deal-delete'),
 
     path('customer/add/', views.add_customer, name='customer-add'),
     path('customer/view/', views.view_customers, name='customer-view'),
+    path('customer/single/view/<int:id>/', views.view_single_customer, name='view-single-customer'),
     path('customer/update/<int:id>/', views.update_customer, name='customer-update'),
     path('customer/delete/<int:id>/', views.delete_customer, name='customer-delete'),
 
     path('task/add/', views.add_task, name='task-add'),
     path('task/view/', views.view_tasks, name='task-view'),
+    path('task/single/view/<int:id>/', views.view_single_task, name='view-single-task'),
     path('task/update/<int:id>/', views.update_task, name='task-update'),
     path('task/delete/<int:id>/', views.delete_task, name='task-delete'),
 
     path('staff/add/', views.add_staff, name='staff-add'),
     path('staff/view/', views.view_staff, name='staff-view'),
+    path('staff/single/view/<int:id>/', views.view_single_staff, name='view-single-staff'),
     path('staff/update/<int:id>/', views.update_staff, name='staff-update'),
     path('staff/delete/<int:id>/', views.delete_staff, name='staff-delete'),
 
