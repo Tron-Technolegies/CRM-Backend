@@ -64,7 +64,8 @@ def view_leads(request):
                 "email": i.email,
                 "companyName": i.company_name,
                 "source": i.lead_source,
-                "assignedTo": str(i.assigned_to) if i.assigned_to else "—",
+                "assignedTo": i.assigned_to.full_name if i.assigned_to else "—",
+                "assignedToId": i.assigned_to.id if i.assigned_to else None,
                 "status": i.get_status_display(),
                 "priority": i.priority,
                 "description": i.lead_description,
@@ -87,7 +88,8 @@ def view_single_lead(request, id):
                 "email": lead.email,
                 "companyName": lead.company_name,
                 "source": lead.lead_source,
-                "assignedTo": str(lead.assigned_to) if lead.assigned_to else "—",
+                "assignedTo": lead.assigned_to.full_name if lead.assigned_to else "—",
+                "assignedToId": lead.assigned_to.id if lead.assigned_to else None, 
                 "status": lead.get_status_display(),
                 "priority": lead.priority,
                 "description": lead.lead_description,
@@ -105,7 +107,6 @@ def update_lead(request, id):
     try:
         lead = Lead.objects.get(id=id)
     except Lead.DoesNotExist:
-        print("UPDATE ERROR:", str(e))
         return HttpResponse("Lead not found", status=404)
 
     lead.full_name = request.data.get("full_name") or lead.full_name
@@ -113,16 +114,25 @@ def update_lead(request, id):
     lead.email = request.data.get("email") or lead.email
     lead.company_name = request.data.get("company_name") or lead.company_name
     lead.lead_source = request.data.get("lead_source") or lead.lead_source
-    lead.assigned_to = request.data.get("assigned_to") or lead.assigned_to
     lead.priority = request.data.get("priority") or lead.priority
     lead.status = request.data.get("status") or lead.status
-    lead.expected_closing_date = request.data.get("expected_closing_date") or lead.expected_closing_date
+    lead.expected_closing_date = request.data.get("expected_closing_date") or None
     lead.lead_description = request.data.get("lead_description") or lead.lead_description
+
+    assigned_to_id = request.data.get("assigned_to")
+    if assigned_to_id:
+        try:
+            lead.assigned_to = Staff.objects.get(id=assigned_to_id)
+        except Staff.DoesNotExist:
+            return HttpResponse("Staff not found", status=404)
+    else:
+        lead.assigned_to = None
 
     try:
         lead.save()
         return HttpResponse("Lead updated successfully", status=200)
     except Exception as e:
+        print("SAVE ERROR:", str(e))
         return HttpResponse(str(e), status=500)
 
 
@@ -203,7 +213,8 @@ def view_deals(request):
             "stage": i.stage,
             "value": float(i.deal_amount) if i.deal_amount else 0,
             "expectedCloseDate": str(i.expected_close_date) if i.expected_close_date else "—",
-            "assignedTo": str(i.assigned_to) if i.assigned_to else "—",
+            "assignedTo": i.assigned_to.full_name if i.assigned_to else "—",
+            "assignedToId": i.assigned_to.id if i.assigned_to else None,
             "source": i.deal_source,
             "priority": i.priority,
             "description": i.deal_description,
@@ -224,7 +235,8 @@ def view_single_deals(request, id):
                 "stage": deal.stage,
                 "value": float(deal.deal_amount) if deal.deal_amount else 0,
                 "expectedCloseDate": str(deal.expected_close_date) if deal.expected_close_date else "—",
-                "assignedTo": str(deal.assigned_to) if deal.assigned_to else "—",
+                "assignedTo": deal.assigned_to.full_name if deal.assigned_to else "—",
+                "assignedToId": deal.assigned_to.id if deal.assigned_to else None,
                 "source": deal.deal_source,
                 "priority": deal.priority,
                 "description": deal.deal_description,
@@ -245,11 +257,16 @@ def update_deal(request, id):
     deal.company_name = request.data.get("company_name") or deal.company_name
     deal.deal_amount = request.data.get("deal_amount") or deal.deal_amount
     deal.stage = request.data.get("stage") or deal.stage
-    deal.assigned_to = request.data.get("assigned_to") or deal.assigned_to
     deal.expected_close_date = request.data.get("expected_close_date") or deal.expected_close_date
     deal.deal_source = request.data.get("deal_source") or deal.deal_source
     deal.priority = request.data.get("priority") or deal.priority
     deal.deal_description = request.data.get("deal_description") or deal.deal_description
+
+    assigned_to_id = request.data.get("assigned_to")
+    if assigned_to_id:
+        deal.assigned_to = get_object_or_404(Staff, id=assigned_to_id)
+    else:
+        deal.assigned_to = None
 
     try:
         deal.save()
@@ -439,7 +456,8 @@ def view_tasks(request):
             "id": i.id,
             "title": i.title,
             "description": i.description,
-            "assignedTo": str(i.assigned_to) if i.assigned_to else "—",
+            "assignedTo": i.assigned_to.full_name if i.assigned_to else "—",
+            "assignedToId": i.assigned_to.id if i.assigned_to else None,
             "relatedTo": i.related_to,
             "priority": i.priority,
             "status": i.status,
@@ -459,7 +477,8 @@ def view_single_task(request, id):
                 "id": task.id,
                 "title": task.title,
                 "description": task.description,
-                "assignedTo": str(task.assigned_to) if task.assigned_to else "—",
+                "assignedTo": task.assigned_to.full_name if task.assigned_to else "—",
+                "assignedToId": task.assigned_to.id if task.assigned_to else None,
                 "relatedTo": task.related_to,
                 "priority": task.priority,
                 "status": task.status,
@@ -481,16 +500,20 @@ def update_task(request, id):
 
     task.title = request.data.get("title") or task.title
     task.description = request.data.get("description") or task.description
-    task.assigned_to = request.data.get("assigned_to") or task.assigned_to
     task.related_to = request.data.get("related_to") or task.related_to
     task.priority = request.data.get("priority") or task.priority
     task.status = request.data.get("status") or task.status
     task.due_date = request.data.get("due_date") or task.due_date
 
+    assigned_to_id = request.data.get("assigned_to")
+    if assigned_to_id:
+        task.assigned_to = get_object_or_404(Staff, id=assigned_to_id)
+    else:
+        task.assigned_to = None
+
     try:
         task.save()
         return HttpResponse("Task updated successfully", status=200)
-
     except Exception as e:
         return HttpResponse(str(e), status=500)
     
