@@ -1,5 +1,5 @@
 from django.db import models
-
+from django.contrib.auth.models import User
 
 
 class Staff(models.Model):
@@ -10,10 +10,15 @@ class Staff(models.Model):
         ("support agent", "Support agent"),
     ]
 
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="staff", null=True, blank=True,)
+
     full_name = models.CharField(max_length=100)
     email = models.EmailField(unique=True)
-    role = models.CharField(max_length=50, choices=ROLE_CHOICES)
-    department = models.CharField(max_length=100)
+    # role = models.CharField(max_length=50, choices=ROLE_CHOICES)
+    # department = models.CharField(max_length=100)
+
+    role = models.CharField(max_length=50, choices=ROLE_CHOICES, blank=True, default="")
+    department = models.CharField(max_length=100, blank=True, default="")
 
     is_invited = models.BooleanField(default=False)
     invited_at = models.DateTimeField(auto_now_add=True)

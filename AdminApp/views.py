@@ -6,8 +6,104 @@ from django.db.models import Sum
 from django.db.models.functions import TruncWeek
 from django.db.models import Count
 
-
 from AdminApp.models import Customer, Deal, Lead, Staff, Task
+
+from django.contrib.auth import authenticate
+from django.contrib.auth.models import User
+from django.http import JsonResponse
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from rest_framework_simplejwt.tokens import RefreshToken
+
+# .............. authentication..............
+@api_view(['POST'])
+def user_signup(request):
+    name = request.data.get("name")
+    email = request.data.get("email")
+    password = request.data.get("password")
+
+    if not email or not password or not name:
+        return Response({"message": "Name, email and password are required"}, status=400)
+
+    if User.objects.filter(email=email).exists():
+        return Response({"message": "Email already exists"}, status=400)
+
+    user = User.objects.create_user(
+        username=email,
+        email=email,
+        password=password,
+        first_name=name,
+    )
+
+    # Create Staff with no role/department — super admin assigns later
+    Staff.objects.create(
+        user=user,
+        full_name=name,
+        email=email,
+        role="",
+        department="",
+        is_invited=False,
+    )
+
+    return Response({"message": "Account created successfully"})
+
+
+
+@api_view(['POST'])
+def user_login(request):
+    email = request.data.get("email")
+    password = request.data.get("password")
+
+    if not email or not password:
+        return Response({"message": "Email and password are required"}, status=400)
+
+    try:
+        user_obj = User.objects.get(email=email)
+    except User.DoesNotExist:
+        return Response({"message": "Invalid credentials"}, status=401)
+
+    user = authenticate(username=user_obj.username, password=password)
+
+    if user is None:
+        return Response({"message": "Invalid credentials"}, status=401)
+
+    # Get linked staff via OneToOne relation
+    try:
+        staff = user.staff
+        staff_data = {
+            "id": staff.id,
+            "fullName": staff.full_name,
+            "role": staff.role,
+            "department": staff.department,
+        }
+    except Staff.DoesNotExist:
+        staff_data = None
+
+    refresh = RefreshToken.for_user(user)
+
+    return JsonResponse({
+        "access": str(refresh.access_token),
+        "refresh": str(refresh),
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "name": user.first_name,
+            "staff": staff_data,
+        }
+    })
+
+
+
+@api_view(['POST'])
+def user_logout(request):
+    try:
+        refresh_token = request.data.get("refresh")
+        token = RefreshToken(refresh_token)
+        token.blacklist()
+        return Response({"message": "Logged out successfully"})
+    except Exception as e:
+        return Response({"error": str(e)}, status=400)
+
 
 # ..............lead.......................
 @api_view(['POST'])

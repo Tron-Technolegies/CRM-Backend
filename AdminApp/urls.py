@@ -2,6 +2,10 @@ from django.urls import path
 from AdminApp import views
 
 urlpatterns= [
+    path('staff/signup/', views.user_signup, name='signup'),
+    path('staff/login/', views.user_login, name='login'),
+    path('staff/logout/', views.user_logout, name='logout'),
+
     path('lead/add/', views.add_lead, name='lead-add'),
     path('lead/view/', views.view_leads, name='lead-view'),
     path('lead/single/view/<int:id>/', views.view_single_lead, name='view-single-lead'),
