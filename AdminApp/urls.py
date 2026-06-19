@@ -43,4 +43,9 @@ urlpatterns= [
     path('deals/linkable/', views.get_linkable_deals, name='linkable-deals'),
 
     path('leads/by-source/', views.leads_by_source, name='leads-by-source'),
+
+    path('picklists/view/', views.view_picklists, name='picklists-view'),
+    path('picklists/add/', views.add_picklist_option, name='picklists-add'),
+    path('picklists/update/<int:id>/', views.update_picklist_option, name='picklists-update'),
+    path('picklists/delete/<int:id>/', views.delete_picklist_option, name='picklists-delete'),
 ]

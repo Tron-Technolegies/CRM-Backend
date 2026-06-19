@@ -197,3 +197,32 @@ class Task(models.Model):
 
     def __str__(self):
         return self.title
+    
+
+
+class PicklistOption(models.Model):
+    FIELD_CHOICES = [
+        ("lead_status", "Lead Status"),
+        ("lead_source", "Lead Source"),
+        ("lead_priority", "Lead Priority"),
+        ("deal_stage", "Deal Stage"),
+        ("deal_source", "Deal Source"),
+        ("deal_priority", "Deal Priority"),
+        ("customer_status", "Customer Status"),
+        ("customer_industry", "Customer Industry"),
+        ("task_status", "Task Status"),
+        ("task_priority", "Task Priority"),
+    ]
+
+    field = models.CharField(max_length=50, choices=FIELD_CHOICES)
+    value = models.CharField(max_length=50)   # internal value, e.g. "new"
+    label = models.CharField(max_length=50)   # display label, e.g. "New"
+    order = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        unique_together = ("field", "value")
+        ordering = ["field", "order"]
+
+    def __str__(self):
+        return f"{self.field}: {self.label}"

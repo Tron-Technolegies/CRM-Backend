@@ -6,7 +6,7 @@ from django.db.models import Sum
 from django.db.models.functions import TruncWeek
 from django.db.models import Count
 
-from AdminApp.models import Customer, Deal, Lead, Staff, Task
+from AdminApp.models import Customer, Deal, Lead, PicklistOption, Staff, Task
 
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
@@ -879,3 +879,56 @@ def leads_by_source(request):
     ]
 
     return JsonResponse({"data": data, "total": total})
+
+
+
+# .......... Add, Edit, View, Delete the choices ...........
+
+@api_view(['GET'])
+def view_picklists(request):
+    field = request.GET.get("field")
+    qs = PicklistOption.objects.filter(is_active=True)
+    if field:
+        qs = qs.filter(field=field)
+    data = [{"id": o.id, "field": o.field, "value": o.value, "label": o.label, "order": o.order} for o in qs]
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['POST'])
+def add_picklist_option(request):
+    field = request.data.get("field")
+    value = request.data.get("value")
+    label = request.data.get("label")
+
+    if not field or not value or not label:
+        return HttpResponse("field, value and label are required", status=400)
+
+    if PicklistOption.objects.filter(field=field, value=value).exists():
+        return HttpResponse("This option already exists", status=400)
+
+    max_order = PicklistOption.objects.filter(field=field).count()
+    PicklistOption.objects.create(field=field, value=value, label=label, order=max_order)
+    return HttpResponse("Option added successfully", status=201)
+
+
+@api_view(['PUT'])
+def update_picklist_option(request, id):
+    try:
+        option = PicklistOption.objects.get(id=id)
+    except PicklistOption.DoesNotExist:
+        return HttpResponse("Option not found", status=404)
+
+    option.label = request.data.get("label") or option.label
+    option.is_active = request.data.get("is_active", option.is_active)
+    option.save()
+    return HttpResponse("Option updated successfully", status=200)
+
+
+@api_view(['DELETE'])
+def delete_picklist_option(request, id):
+    try:
+        option = PicklistOption.objects.get(id=id)
+        option.delete()
+        return JsonResponse({"message": "Option deleted successfully"})
+    except PicklistOption.DoesNotExist:
+        return HttpResponse("Option not found", status=404)
