@@ -226,3 +226,82 @@ class PicklistOption(models.Model):
 
     def __str__(self):
         return f"{self.field}: {self.label}"
+    
+
+
+class Address(models.Model):
+    country = models.CharField(max_length=255, blank=True)
+    address = models.CharField(max_length=255, blank=True)
+    street_address = models.CharField(max_length=255, blank=True)
+    city = models.CharField(max_length=255, blank=True)
+    state = models.CharField(max_length=255, blank=True)
+    zip_code = models.CharField(max_length=20, blank=True)
+
+    def __str__(self):
+        return f"{self.city}, {self.state}, {self.country}"
+
+
+
+class Accounts(models.Model):
+    account_name = models.CharField(max_length=255)
+    assigned_to = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="accounts")
+    phone_number = models.CharField(max_length=20, blank=True)
+    account_site = models.CharField(max_length=255, blank=True)
+    parent_account = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name="sub_accounts")
+    website = models.CharField(max_length=255, blank=True)
+    account_type = models.CharField(max_length=255, blank=True)
+    industry = models.CharField(max_length=255, blank=True)
+    ownership = models.CharField(max_length=255, blank=True)
+    employees = models.CharField(max_length=20, blank=True)
+
+    billing_address = models.ForeignKey(Address, on_delete=models.SET_NULL, null=True, blank=True, related_name="billing_accounts")
+    shipping_address = models.ForeignKey(Address, on_delete=models.SET_NULL, null=True, blank=True, related_name="shipping_accounts")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def delete(self, *args, **kwargs):
+        
+        if self.billing_address:
+            self.billing_address.delete()
+        if self.shipping_address:
+            self.shipping_address.delete()
+        super().delete(*args, **kwargs)
+
+
+
+class Quotes(models.Model):
+    QUOTE_STAGE_CHOICES = [
+        ('draft', 'Draft'),
+        ('negotiation', 'Negotiation'),
+        ('delivered', 'Delivered'),
+        ('on_hold', 'On Hold'),
+        ('confirmed', 'Confirmed'),
+        ('closed_won', 'Closed Won'),
+        ('closed_lost', 'Closed Lost'),
+    ]
+    
+    subject = models.CharField(max_length=255)
+    quote_stage = models.CharField(max_length=50, choices=QUOTE_STAGE_CHOICES, default='draft')
+    valid_until = models.DateField(null=True, blank=True)
+
+    assigned_to = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="quotes")
+    deal = models.ForeignKey('Deal', on_delete=models.SET_NULL, null=True, blank=True, related_name="quotes")
+    contact_name = models.CharField(max_length=255)
+    account = models.ForeignKey(Accounts, on_delete=models.SET_NULL, null=True, blank=True, related_name="quotes")
+
+    billing_address = models.ForeignKey(Address, on_delete=models.SET_NULL, null=True, blank=True, related_name="quote_billing")
+    shipping_address = models.ForeignKey(Address, on_delete=models.SET_NULL, null=True, blank=True, related_name="quote_shipping")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.subject
+
+    def delete(self, *args, **kwargs):
+        if self.billing_address:
+            self.billing_address.delete()
+        if self.shipping_address:
+            self.shipping_address.delete()
+        super().delete(*args, **kwargs)

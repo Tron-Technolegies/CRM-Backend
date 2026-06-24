@@ -48,4 +48,15 @@ urlpatterns= [
     path('picklists/add/', views.add_picklist_option, name='picklists-add'),
     path('picklists/update/<int:id>/', views.update_picklist_option, name='picklists-update'),
     path('picklists/delete/<int:id>/', views.delete_picklist_option, name='picklists-delete'),
+
+    path('account/add/', views.add_account, name='acc-add'),
+    path('account/view/', views.view_accounts, name='view-acc'),
+    path('account/update/<int:id>/', views.update_account, name='update-acc'),
+    path('account/delete/<int:id>/', views.delete_account, name='delete-acc'),
+
+    # path('quote/add/', views.add_quote, name='quote-add'),
+    # path('quote/view/', views.view_quotes, name='quote-view'),
+    # path('quote/single/view/<int:id>/', views.view_single_quote, name='quote-single'),
+    # path('quote/update/<int:id>/', views.update_quote, name='quote-update'),
+    # path('quote/delete/<int:id>/', views.delete_quote, name='quote-delete'),
 ]
