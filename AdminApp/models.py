@@ -14,9 +14,6 @@ class Staff(models.Model):
 
     full_name = models.CharField(max_length=100)
     email = models.EmailField(unique=True)
-    # role = models.CharField(max_length=50, choices=ROLE_CHOICES)
-    # department = models.CharField(max_length=100)
-
     role = models.CharField(max_length=50, choices=ROLE_CHOICES, blank=True, default="")
     department = models.CharField(max_length=100, blank=True, default="")
 
@@ -25,7 +22,28 @@ class Staff(models.Model):
 
     def __str__(self):
         return self.full_name
-    
+
+
+
+class Customer(models.Model):
+    STATUS_CHOICES = [
+        ("active", "Active"),
+        ("inactive", "Inactive"),
+    ]
+    company_name = models.CharField(max_length=255)
+    contact_name = models.CharField(max_length=255)
+    phone_number = models.CharField(max_length=20)
+    email = models.EmailField(blank=True, null=True)
+    industry = models.CharField(max_length=50)
+    status = models.CharField( max_length=20, choices=STATUS_CHOICES, default="active")
+    lifetime_value = models.DecimalField( max_digits=12, decimal_places=2, default=0 )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.company_name
+     
 
 
 class Lead(models.Model):
@@ -55,15 +73,14 @@ class Lead(models.Model):
     phone_number = models.CharField(max_length=20)
     email = models.EmailField(blank=True, null=True)
     company_name = models.CharField(max_length=255)
-    lead_source = models.CharField( max_length=50, choices=SOURCE_CHOICES, default="Website")
-    assigned_to = models.ForeignKey( Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="leads")
-    priority = models.CharField( max_length=20, choices=PRIORITY_CHOICES, default="Medium")
-    expected_closing_date = models.DateField( blank=True, null=True)
-    lead_description = models.TextField( blank=True, null=True)
-
+    lead_source = models.CharField(max_length=50, choices=SOURCE_CHOICES, default="Website")
+    assigned_to = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="leads")
+    priority = models.CharField(max_length=20, choices=PRIORITY_CHOICES, default="Medium")
+    lead_description = models.TextField(blank=True, null=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="new")
+    
+    converted_customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name="originating_leads")
     converted_at = models.DateTimeField(blank=True, null=True)
-
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -108,67 +125,17 @@ class Deal(models.Model):
     priority = models.CharField( max_length=20, choices=PRIORITY_CHOICES, default="Medium" )
     deal_description = models.TextField( blank=True, null=True )
 
-    lead = models.ForeignKey(Lead, on_delete=models.SET_NULL, null=True, blank=True, related_name="deals")
     customer = models.ForeignKey("Customer", on_delete=models.SET_NULL, null=True, blank=True, related_name="deals")
+    account = models.ForeignKey("Accounts", on_delete=models.SET_NULL, null=True, blank=True, related_name="deals")
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    def save(self, *args, **kwargs):
-        # Auto-create or link Customer when Deal is marked Won
-        if self.stage == "Won" and self.customer is None:
-            customer, created = Customer.objects.get_or_create(
-                company_name=self.company_name,
-                defaults={
-                    "contact_name": self.lead.full_name if self.lead else "",
-                    "phone_number": self.lead.phone_number if self.lead else "",
-                    "email": self.lead.email if self.lead else None,
-                    "industry": "",
-                    "status": "active",
-                    "lifetime_value": self.deal_amount,
-                },
-            )
-            if not created:
-                # Add deal amount to existing customer's lifetime value
-                customer.lifetime_value += self.deal_amount
-                customer.save()
-    
-            self.customer = customer
-
-            # Mark the originating lead as converted
-            if self.lead and self.lead.status != "converted":
-                from django.utils import timezone
-                self.lead.status = "converted"
-                self.lead.converted_at = timezone.now()
-                self.lead.save()
-
-        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.deal_name
     
 
-
-class Customer(models.Model):
-    STATUS_CHOICES = [
-        ("active", "Active"),
-        ("inactive", "Inactive"),
-    ]
-
-    company_name = models.CharField(max_length=255)
-    contact_name = models.CharField(max_length=255)
-    phone_number = models.CharField(max_length=20)
-    email = models.EmailField(blank=True, null=True)
-    industry = models.CharField(max_length=50)
-    status = models.CharField( max_length=20, choices=STATUS_CHOICES, default="active")
-    lifetime_value = models.DecimalField( max_digits=12, decimal_places=2, default=0 )
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        return self.company_name
-    
 
 
 class Task(models.Model):
@@ -305,3 +272,20 @@ class Quotes(models.Model):
         if self.shipping_address:
             self.shipping_address.delete()
         super().delete(*args, **kwargs)
+
+class QuoteProduct(models.Model):  
+
+    quote = models.ForeignKey(Quotes, on_delete=models.CASCADE, related_name="items")
+    
+    product = models.CharField(max_length=255)
+    description = models.TextField(blank=True, null=True)
+    
+    quantity = models.PositiveIntegerField(default=1)
+    list_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    discount = models.DecimalField(max_digits=5, decimal_places=2, default=0.00, help_text="Percentage or Fixed amount")
+    tax = models.DecimalField(max_digits=5, decimal_places=2, default=0.00, help_text="Tax percentage")
+    total = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+
+    def __str__(self):
+        return f"{self.product} (Quote: {self.quote.subject})"

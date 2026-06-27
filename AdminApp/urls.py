@@ -38,7 +38,7 @@ urlpatterns= [
 
     path('report/dashboard/', views.report_view, name='report-dashboard'),
 
-    path('leads/<int:lead_id>/convert/', views.convert_lead_to_deal, name='lead-to-deal'),
+    path('leads/<int:lead_id>/convert/', views.convert_lead_to_customer, name='lead-to-customer'),
     path('leads/unconverted/', views.get_unconverted_leads, name='unconverted-leads'),
     path('deals/linkable/', views.get_linkable_deals, name='linkable-deals'),
 
@@ -54,9 +54,9 @@ urlpatterns= [
     path('account/update/<int:id>/', views.update_account, name='update-acc'),
     path('account/delete/<int:id>/', views.delete_account, name='delete-acc'),
 
-    # path('quote/add/', views.add_quote, name='quote-add'),
-    # path('quote/view/', views.view_quotes, name='quote-view'),
-    # path('quote/single/view/<int:id>/', views.view_single_quote, name='quote-single'),
-    # path('quote/update/<int:id>/', views.update_quote, name='quote-update'),
-    # path('quote/delete/<int:id>/', views.delete_quote, name='quote-delete'),
+    path('quote/add/', views.add_quote, name='quote-add'),
+    path('quote/view/', views.view_quotes, name='quote-view'),
+    path('quote/single/view/<int:id>/', views.view_single_quote, name='quote-single'),
+    path('quote/update/<int:id>/', views.update_quote, name='quote-update'),
+    path('quote/delete/<int:id>/', views.delete_quote, name='quote-delete'),
 ]

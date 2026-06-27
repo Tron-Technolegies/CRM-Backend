@@ -5,8 +5,9 @@ from rest_framework.decorators import api_view
 from django.db.models import Sum
 from django.db.models.functions import TruncWeek
 from django.db.models import Count
+from django.db import transaction
 
-from AdminApp.models import Accounts, Address, Customer, Deal, Lead, PicklistOption, Staff, Task
+from AdminApp.models import Accounts, Address, Customer, Deal, Lead, PicklistOption, QuoteProduct, Quotes, Staff, Task
 
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
@@ -116,7 +117,7 @@ def add_lead(request):
     email = request.data.get("email")
     company_name = request.data.get("company_name")
     lead_source = request.data.get("lead_source")
-    # assigned_to = request.data.get("assigned_to")
+    assigned_to = request.data.get("assigned_to")
     priority = request.data.get("priority")
     expected_closing_date = request.data.get("expected_closing_date")
     lead_description = request.data.get("lead_description")
@@ -134,7 +135,7 @@ def add_lead(request):
             email=email,
             company_name=company_name,
             lead_source=lead_source,
-            # assigned_to_id=assigned_to,
+            assigned_to_id=assigned_to,
             assigned_to=None,
             priority=priority,
             expected_closing_date=expected_closing_date,
@@ -804,25 +805,26 @@ def report_view(request):
 
 
 
-# ......... convert lead to deal through button ...........
+# ......... convert lead to customer through button ...........
 @api_view(['GET'])
-def convert_lead_to_deal(request, lead_id):
+def convert_lead_to_customer(request, lead_id):
+
     try:
         lead = Lead.objects.get(id=lead_id)
     except Lead.DoesNotExist:
         return HttpResponse("Lead not found", status=404)
 
     if lead.status == "converted":
-        return HttpResponse("Lead already converted", status=400)
+        return HttpResponse("Lead already converted to a customer", status=400)
 
     prefilled_data = {
-        "deal_name": f"{lead.company_name} Deal",
-        "company_name": lead.company_name,
-        "deal_source": lead.lead_source,
-        "priority": lead.priority,
-        "assigned_to": lead.assigned_to_id,
-        "expected_close_date": lead.expected_closing_date,
         "lead_id": lead.id,
+        "company_name": lead.company_name,
+        "contact_name": lead.full_name,
+        "phone_number": lead.phone_number,
+        "email": lead.email,
+        "assigned_to": lead.assigned_to_id,
+        "industry": "", 
     }
 
     return JsonResponse(prefilled_data, status=200)
@@ -1140,274 +1142,236 @@ def delete_account(request, id):
 
 
 # ................. quotes ..................
-# @api_view(['POST'])
-# def add_quote(request):
-#     subject = request.data.get("subject")
-#     quote_stage = request.data.get("quote_stage", "draft")
-#     valid_until = request.data.get("valid_until")
-#     assigned_to_id = request.data.get("assigned_to")
-#     deal_id = request.data.get("deal_id")
-#     contact_name = request.data.get("contact_name", "")
-#     account_id = request.data.get("account_id")
-#     billing_data = request.data.get("billing_add")
-#     shipping_data = request.data.get("shipping_add")
+# Helper to serialize products
+def _serialize_products(quote):
+    return [
+        {
+            "id": item.id,
+            "product": item.product,
+            "description": item.description,
+            "quantity": item.quantity,
+            "listPrice": float(item.list_price),
+            "amount": float(item.amount),
+            "discount": float(item.discount),
+            "tax": float(item.tax),
+            "total": float(item.total),
+        }
+        for item in quote.items.all()
+    ]
 
-#     if not subject:
-#         return HttpResponse("Subject is required", status=400)
-
-#     try:
-#         # Auto-fill address from deal's account if not provided
-#         deal = None
-#         account = None
-
-#         if deal_id:
-#             try:
-#                 deal = Deal.objects.get(id=deal_id)
-#                 if not account_id and deal.account:
-#                     account = deal.account
-#                     account_id = account.id
-#             except Deal.DoesNotExist:
-#                 return HttpResponse("Deal not found", status=404)
-
-#         if account_id and not account:
-#             try:
-#                 account = Accounts.objects.get(id=account_id)
-#             except Accounts.DoesNotExist:
-#                 return HttpResponse("Account not found", status=404)
-
-#         # Create billing address
-#         billing_address = None
-#         if billing_data:
-#             billing_address = Address.objects.create(
-#                 country=billing_data.get("country", ""),
-#                 address=billing_data.get("address", ""),
-#                 street_address=billing_data.get("street_add", ""),
-#                 city=billing_data.get("city", ""),
-#                 state=billing_data.get("state", ""),
-#                 zip_code=billing_data.get("zip_code", ""),
-#             )
-#         elif account and account.billing_address:
-#             # Auto-fill from account billing address
-#             billing_address = Address.objects.create(
-#                 country=account.billing_address.country,
-#                 address=account.billing_address.address,
-#                 street_address=account.billing_address.street_address,
-#                 city=account.billing_address.city,
-#                 state=account.billing_address.state,
-#                 zip_code=account.billing_address.zip_code,
-#             )
-
-#         # Create shipping address
-#         shipping_address = None
-#         if shipping_data:
-#             shipping_address = Address.objects.create(
-#                 country=shipping_data.get("country", ""),
-#                 address=shipping_data.get("address", ""),
-#                 street_address=shipping_data.get("street_add", ""),
-#                 city=shipping_data.get("city", ""),
-#                 state=shipping_data.get("state", ""),
-#                 zip_code=shipping_data.get("zip_code", ""),
-#             )
-#         elif account and account.shipping_address:
-#             # Auto-fill from account shipping address
-#             shipping_address = Address.objects.create(
-#                 country=account.shipping_address.country,
-#                 address=account.shipping_address.address,
-#                 street_address=account.shipping_address.street_address,
-#                 city=account.shipping_address.city,
-#                 state=account.shipping_address.state,
-#                 zip_code=account.shipping_address.zip_code,
-#             )
-
-#         Quotes.objects.create(
-#             subject=subject,
-#             quote_stage=quote_stage,
-#             valid_until=valid_until or None,
-#             assigned_to_id=assigned_to_id or None,
-#             deal=deal,
-#             contact_name=contact_name,
-#             account=account,
-#             billing_address=billing_address,
-#             shipping_address=shipping_address,
-#         )
-
-#         return HttpResponse("Quote created successfully", status=201)
-
-#     except Exception as e:
-#         print("ADD QUOTE ERROR:", str(e))
-#         return HttpResponse(str(e), status=500)
+# Helper to serialize addresses
+def _serialize_address(addr):
+    if not addr:
+        return None
+    return {
+        "country": addr.country,
+        "address": addr.address,
+        "street_address": addr.street_address,
+        "city": addr.city,
+        "state": addr.state,
+        "zipCode": addr.zip_code,
+    }
 
 
-# @api_view(['GET'])
-# def view_quotes(request):
-#     quotes = Quotes.objects.select_related(
-#         "assigned_to", "deal", "account",
-#         "billing_address", "shipping_address"
-#     ).all().order_by("-updated_at")
+@api_view(['POST'])
+def add_quote(request):
+    subject = request.data.get("subject")
+    quote_stage = request.data.get("quote_stage", "draft")
+    valid_until = request.data.get("valid_until")
+    assigned_to_id = request.data.get("assigned_to")
+    deal_id = request.data.get("deal_id")
+    contact_name = request.data.get("contact_name", "")
+    account_id = request.data.get("account_id")
+    billing_data = request.data.get("billing_add")
+    shipping_data = request.data.get("shipping_add")
+    
+    # 1. Grab the products array from payload
+    products_data = request.data.get("products", []) 
 
-#     data = []
-#     for q in quotes:
-#         data.append({
-#             "id": q.id,
-#             "subject": q.subject,
-#             "quoteStage": q.quote_stage,
-#             "validUntil": str(q.valid_until) if q.valid_until else None,
-#             "assignedTo": q.assigned_to.full_name if q.assigned_to else "—",
-#             "assignedToId": q.assigned_to.id if q.assigned_to else None,
-#             "dealName": q.deal.deal_name if q.deal else "—",
-#             "dealId": q.deal.id if q.deal else None,
-#             "contactName": q.contact_name,
-#             "accountName": q.account.account_name if q.account else "—",
-#             "accountId": q.account.id if q.account else None,
-#             "billingAddress": {
-#                 "country": q.billing_address.country,
-#                 "address": q.billing_address.address,
-#                 "streetAddress": q.billing_address.street_address,
-#                 "city": q.billing_address.city,
-#                 "state": q.billing_address.state,
-#                 "zipCode": q.billing_address.zip_code,
-#             } if q.billing_address else None,
-#             "shippingAddress": {
-#                 "country": q.shipping_address.country,
-#                 "address": q.shipping_address.address,
-#                 "streetAddress": q.shipping_address.street_address,
-#                 "city": q.shipping_address.city,
-#                 "state": q.shipping_address.state,
-#                 "zipCode": q.shipping_address.zip_code,
-#             } if q.shipping_address else None,
-#             "createdAt": q.created_at.isoformat(),
-#             "updatedAt": q.updated_at.isoformat(),
-#         })
+    if not subject:
+        return HttpResponse("Subject is required", status=400)
 
-#     return JsonResponse(data, safe=False)
+    try:
+        deal = None
+        account = None
 
+        if deal_id:
+            try:
+                deal = Deal.objects.get(id=deal_id)
+            except Deal.DoesNotExist:
+                return HttpResponse("Deal not found", status=404)
 
-# @api_view(['GET'])
-# def view_single_quote(request, id):
-#     quote = get_object_or_404(Quotes, id=id)
+        if account_id:
+            try:
+                account = Accounts.objects.select_related("billing_address", "shipping_address").get(id=account_id)
+            except Accounts.DoesNotExist:
+                return HttpResponse("Account not found", status=404)
+        elif deal and deal.account_id: # Updated to your customer target field safely
+            account = deal.account 
 
-#     data = {
-#         "id": quote.id,
-#         "subject": quote.subject,
-#         "quoteStage": quote.quote_stage,
-#         "validUntil": str(quote.valid_until) if quote.valid_until else None,
-#         "assignedTo": quote.assigned_to.full_name if quote.assigned_to else "—",
-#         "assignedToId": quote.assigned_to.id if quote.assigned_to else None,
-#         "dealName": quote.deal.deal_name if quote.deal else "—",
-#         "dealId": quote.deal.id if quote.deal else None,
-#         "contactName": quote.contact_name,
-#         "accountName": quote.account.account_name if quote.account else "—",
-#         "accountId": quote.account.id if quote.account else None,
-#         "billingAddress": {
-#             "country": quote.billing_address.country,
-#             "address": quote.billing_address.address,
-#             "streetAddress": quote.billing_address.street_address,
-#             "city": quote.billing_address.city,
-#             "state": quote.billing_address.state,
-#             "zipCode": quote.billing_address.zip_code,
-#         } if quote.billing_address else None,
-#         "shippingAddress": {
-#             "country": quote.shipping_address.country,
-#             "address": quote.shipping_address.address,
-#             "streetAddress": quote.shipping_address.street_address,
-#             "city": quote.shipping_address.city,
-#             "state": quote.shipping_address.state,
-#             "zipCode": quote.shipping_address.zip_code,
-#         } if quote.shipping_address else None,
-#         "createdAt": quote.created_at.isoformat(),
-#     }
+        # Wrap database operations in an atomic block
+        with transaction.atomic():
+            billing_address = None
+            if billing_data:
+                billing_address = Address.objects.create(**billing_data)
+            elif account and account.billing_address:
+                src = account.billing_address
+                billing_address = Address.objects.create(
+                    country=src.country, address=src.address,street_address=src.street_Address, city=src.city, state=src.state, zip_code=src.zip_code
+                )
 
-#     return JsonResponse(data, safe=False)
+            shipping_address = None
+            if shipping_data:
+                shipping_address = Address.objects.create(**shipping_data)
+            elif account and account.shipping_address:
+                src = account.shipping_address
+                shipping_address = Address.objects.create(
+                    country=src.country, address=src.address,street_address=src.street_Address, city=src.city, state=src.state, zip_code=src.zip_code
+                )
 
+            # 2. Save the primary Quote header record
+            quote = Quotes.objects.create(
+                subject=subject,
+                quote_stage=quote_stage,
+                valid_until=valid_until or None,
+                assigned_to_id=assigned_to_id or None,
+                deal=deal,
+                contact_name=contact_name,
+                account=account,
+                billing_address=billing_address,
+                shipping_address=shipping_address,
+            )
 
-# @api_view(['PUT'])
-# def update_quote(request, id):
-#     try:
-#         quote = Quotes.objects.get(id=id)
-#     except Quotes.DoesNotExist:
-#         return HttpResponse("Quote not found", status=404)
+            # 3. Create individual QuoteProduct instances safely inside transaction block
+            for item in products_data:
+                QuoteProduct.objects.create(
+                    quote=quote,
+                    product=item.get("product"),
+                    description=item.get("description", ""),
+                    quantity=int(item.get("quantity", 1)),
+                    list_price=item.get("list_price", 0.00),
+                    amount=item.get("amount", 0.00),
+                    discount=item.get("discount", 0.00),
+                    tax=item.get("tax", 0.00),
+                    total=item.get("total", 0.00)
+                )
 
-#     try:
-#         quote.subject = request.data.get("subject") or quote.subject
-#         quote.quote_stage = request.data.get("quote_stage") or quote.quote_stage
-#         quote.contact_name = request.data.get("contact_name") or quote.contact_name
-#         valid_until = request.data.get("valid_until")
-#         if valid_until:
-#             quote.valid_until = valid_until
+        return HttpResponse("Quote and line items created successfully", status=201)
 
-#         assigned_to_id = request.data.get("assigned_to")
-#         if assigned_to_id:
-#             quote.assigned_to_id = assigned_to_id
-
-#         deal_id = request.data.get("deal_id")
-#         if deal_id:
-#             try:
-#                 quote.deal = Deal.objects.get(id=deal_id)
-#             except Deal.DoesNotExist:
-#                 return HttpResponse("Deal not found", status=404)
-
-#         account_id = request.data.get("account_id")
-#         if account_id:
-#             try:
-#                 quote.account = Accounts.objects.get(id=account_id)
-#             except Accounts.DoesNotExist:
-#                 return HttpResponse("Account not found", status=404)
-
-#         # Update billing address
-#         billing_data = request.data.get("billing_add")
-#         if billing_data:
-#             if quote.billing_address:
-#                 quote.billing_address.country = billing_data.get("country", quote.billing_address.country)
-#                 quote.billing_address.address = billing_data.get("address", quote.billing_address.address)
-#                 quote.billing_address.street_address = billing_data.get("street_add", quote.billing_address.street_address)
-#                 quote.billing_address.city = billing_data.get("city", quote.billing_address.city)
-#                 quote.billing_address.state = billing_data.get("state", quote.billing_address.state)
-#                 quote.billing_address.zip_code = billing_data.get("zip_code", quote.billing_address.zip_code)
-#                 quote.billing_address.save()
-#             else:
-#                 quote.billing_address = Address.objects.create(
-#                     country=billing_data.get("country", ""),
-#                     address=billing_data.get("address", ""),
-#                     street_address=billing_data.get("street_add", ""),
-#                     city=billing_data.get("city", ""),
-#                     state=billing_data.get("state", ""),
-#                     zip_code=billing_data.get("zip_code", ""),
-#                 )
-
-#         # Update shipping address
-#         shipping_data = request.data.get("shipping_add")
-#         if shipping_data:
-#             if quote.shipping_address:
-#                 quote.shipping_address.country = shipping_data.get("country", quote.shipping_address.country)
-#                 quote.shipping_address.address = shipping_data.get("address", quote.shipping_address.address)
-#                 quote.shipping_address.street_address = shipping_data.get("street_add", quote.shipping_address.street_address)
-#                 quote.shipping_address.city = shipping_data.get("city", quote.shipping_address.city)
-#                 quote.shipping_address.state = shipping_data.get("state", quote.shipping_address.state)
-#                 quote.shipping_address.zip_code = shipping_data.get("zip_code", quote.shipping_address.zip_code)
-#                 quote.shipping_address.save()
-#             else:
-#                 quote.shipping_address = Address.objects.create(
-#                     country=shipping_data.get("country", ""),
-#                     address=shipping_data.get("address", ""),
-#                     street_address=shipping_data.get("street_add", ""),
-#                     city=shipping_data.get("city", ""),
-#                     state=shipping_data.get("state", ""),
-#                     zip_code=shipping_data.get("zip_code", ""),
-#                 )
-
-#         quote.save()
-#         return HttpResponse("Quote updated successfully", status=200)
-
-#     except Exception as e:
-#         print("UPDATE QUOTE ERROR:", str(e))
-#         return HttpResponse(str(e), status=500)
+    except Exception as e:
+        print("ADD QUOTE ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
 
 
-# @api_view(['DELETE'])
-# def delete_quote(request, id):
-#     try:
-#         quote = Quotes.objects.get(id=id)
-#         quote.delete()
-#         return JsonResponse({"message": "Quote deleted successfully"})
-#     except Quotes.DoesNotExist:
-#         return HttpResponse("Quote not found", status=404)
+@api_view(['GET'])
+def view_quotes(request):
+    # Added "items" prefetching to dramatically boost query execution speed
+    quotes = Quotes.objects.prefetch_related("items").select_related(
+        "assigned_to", "deal", "account", "billing_address", "shipping_address"
+    ).all().order_by("-updated_at")
+
+    data = []
+    for i in quotes:
+        data.append({
+            "id": i.id,
+            "subject": i.subject,
+            "quoteStage": i.quote_stage,
+            "validUntil": str(i.valid_until) if i.valid_until else None,
+            "assignedTo": i.assigned_to.full_name if i.assigned_to else "—",
+            "dealName": i.deal.deal_name if i.deal else "—",
+            "accountName": i.account.company_name if i.account else None,
+            "billingAddress": _serialize_address(i.billing_address),
+            "shippingAddress": _serialize_address(i.shipping_address),
+            "products": _serialize_products(i), # Appends the linked items list to the JSON payload
+            "createdAt": i.created_at.isoformat(),
+        })
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['GET'])
+def view_single_quote(request, id):
+    quote = get_object_or_404(
+        Quotes.objects.prefetch_related("items").select_related(
+            "assigned_to", "deal", "account", "billing_address", "shipping_address"
+        ),
+        id=id
+    )
+
+    data = {
+        "id": quote.id,
+        "subject": quote.subject,
+        "quoteStage": quote.quote_stage,
+        "validUntil": str(quote.valid_until) if quote.valid_until else None,
+        "contactName": quote.contact_name,
+        "products": _serialize_products(quote), # Exposes itemized items detail arrays out cleanly
+        "billingAddress": _serialize_address(quote.billing_address),
+        "shippingAddress": _serialize_address(quote.shipping_address),
+    }
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['PUT'])
+def update_quote(request, id):
+    try:
+        quote = Quotes.objects.get(id=id)
+    except Quotes.DoesNotExist:
+        return HttpResponse("Quote not found", status=404)
+
+    try:
+        with transaction.atomic():
+            quote.subject = request.data.get("subject") or quote.subject
+            quote.quote_stage = request.data.get("quote_stage") or quote.quote_stage
+            
+            # Simple metadata overrides
+            if "valid_until" in request.data: quote.valid_until = request.data.get("valid_until")
+            if "assigned_to" in request.data: quote.assigned_to_id = request.data.get("assigned_to")
+
+            quote.save()
+
+            # Dynamic Item Synchronizer Block
+            products_data = request.data.get("products")
+            if products_data is not None:
+                # Flush out previous line item rows and overwrite cleanly with updated collection list
+                quote.items.all().delete()
+                for item in products_data:
+                    QuoteProduct.objects.create(
+                        quote=quote,
+                        product=item.get("product"),
+                        description=item.get("description", ""),
+                        quantity=int(item.get("quantity", 1)),
+                        list_price=item.get("list_price", 0.00),
+                        amount=item.get("amount", 0.00),
+                        discount=item.get("discount", 0.00),
+                        tax=item.get("tax", 0.00),
+                        total=item.get("total", 0.00)
+                    )
+
+        return HttpResponse("Quote updated successfully", status=200)
+
+    except Exception as e:
+        return HttpResponse(str(e), status=500)
+    
+
+@api_view(['DELETE'])
+def delete_quote(request, id):
+    try:
+        quote = Quotes.objects.select_related(
+            "billing_address", "shipping_address"
+        ).get(id=id)
+
+        billing = quote.billing_address
+        shipping = quote.shipping_address
+
+        quote.delete()
+
+        if billing and billing.id is not None:
+            billing.delete()
+        if shipping and shipping.id is not None:
+            shipping.delete()
+
+        return JsonResponse({"message": "Quote deleted successfully"})
+
+    except Quotes.DoesNotExist:
+        return HttpResponse("Quote not found", status=404)
