@@ -59,4 +59,10 @@ urlpatterns= [
     path('quote/single/view/<int:id>/', views.view_single_quote, name='quote-single'),
     path('quote/update/<int:id>/', views.update_quote, name='quote-update'),
     path('quote/delete/<int:id>/', views.delete_quote, name='quote-delete'),
+
+    path('meeting/add/', views.add_meeting, name='meeting-add'),
+    path('meeting/view/', views.view_meetings, name='meeting-view'),
+    path('meeting/single/view/<int:id>/', views.view_single_meeting, name='meeting-single'),
+    path('meeting/update/<int:id>/', views.update_meeting, name='meeting-update'),
+    path('meeting/delete/<int:id>/', views.delete_meeting, name='meeting-delete'),
 ]

@@ -289,3 +289,58 @@ class QuoteProduct(models.Model):
 
     def __str__(self):
         return f"{self.product} (Quote: {self.quote.subject})"
+    
+
+
+class Meeting(models.Model):
+    VENUE_CHOICES = [
+        ("online", "Online"),
+        ("client_location", "Client Location"),
+        ("in_office", "In-Office"),
+    ]
+
+    PROVIDER_CHOICES = [
+        ("zoom", "Zoom"),
+        ("google_meet", "Google Meet"),
+        ("microsoft_teams", "Microsoft Teams"),
+        ("other", "Other"),
+    ]
+
+    RELATED_TYPE_CHOICES = [
+        ("none", "None"),
+        ("lead", "Lead"),
+        ("customer", "Customer"),
+    ]
+
+    REPEAT_CHOICES = [
+        ("none", "None"),
+        ("daily", "Daily"),
+        ("weekly", "Weekly"),
+        ("monthly", "Monthly"),
+    ]
+
+    title = models.CharField(max_length=255)
+    meeting_venue = models.CharField(max_length=50, choices=VENUE_CHOICES, default="online")
+
+    provider = models.CharField(max_length=50, choices=PROVIDER_CHOICES, blank=True, default="")
+
+    location = models.CharField(max_length=255, blank=True, default="")
+    all_day = models.BooleanField(default=False)
+
+    from_datetime = models.DateTimeField()
+    to_datetime = models.DateTimeField()
+
+    host = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="hosted_meetings")
+    participants = models.ManyToManyField(Staff, blank=True, related_name="meetings")
+
+    related_type = models.CharField(max_length=20, choices=RELATED_TYPE_CHOICES, default="none")
+    related_lead = models.ForeignKey(Lead, on_delete=models.SET_NULL, null=True, blank=True, related_name="meetings")
+    related_customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name="meetings")
+
+    repeat = models.CharField(max_length=20, choices=REPEAT_CHOICES, default="none")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.title

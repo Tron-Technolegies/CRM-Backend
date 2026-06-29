@@ -7,7 +7,7 @@ from django.db.models.functions import TruncWeek
 from django.db.models import Count
 from django.db import transaction
 
-from AdminApp.models import Accounts, Address, Customer, Deal, Lead, PicklistOption, QuoteProduct, Quotes, Staff, Task
+from AdminApp.models import Accounts, Address, Customer, Deal, Lead, Meeting, PicklistOption, QuoteProduct, Quotes, Staff, Task
 
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
@@ -1375,3 +1375,181 @@ def delete_quote(request, id):
 
     except Quotes.DoesNotExist:
         return HttpResponse("Quote not found", status=404)
+    
+
+
+# .................. meeting ...............
+@api_view(['POST'])
+def add_meeting(request):
+    title = request.data.get("title")
+    meeting_venue = request.data.get("meeting_venue", "online")
+    provider = request.data.get("provider", "")
+    location = request.data.get("location", "")
+    all_day = request.data.get("all_day", False)
+    from_datetime = request.data.get("from_datetime")
+    to_datetime = request.data.get("to_datetime")
+    host_id = request.data.get("host")
+    participant_ids = request.data.get("participants", [])
+    related_type = request.data.get("related_type", "none")
+    related_lead_id = request.data.get("related_lead")
+    related_customer_id = request.data.get("related_customer")
+    repeat = request.data.get("repeat", "none")
+
+    if not title or not from_datetime or not to_datetime:
+        return HttpResponse("Title, from_datetime and to_datetime are required", status=400)
+
+    try:
+        meeting = Meeting.objects.create(
+            title=title,
+            meeting_venue=meeting_venue,
+            provider=provider if meeting_venue == "online" else "",
+            location=location if meeting_venue != "online" else "",
+            all_day=all_day if meeting_venue != "online" else False,
+            from_datetime=from_datetime,
+            to_datetime=to_datetime,
+            host_id=host_id or None,
+            related_type=related_type,
+            related_lead_id=related_lead_id if related_type == "lead" else None,
+            related_customer_id=related_customer_id if related_type == "customer" else None,
+            repeat=repeat,
+        )
+
+        if participant_ids:
+            meeting.participants.set(participant_ids)
+
+        return HttpResponse("Meeting created successfully", status=201)
+
+    except Exception as e:
+        print("ADD MEETING ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['GET'])
+def view_meetings(request):
+    meetings = Meeting.objects.select_related(
+        "host", "related_lead", "related_customer"
+    ).prefetch_related("participants").all().order_by("-created_at")
+
+    data = []
+    for m in meetings:
+        data.append({
+            "id": m.id,
+            "title": m.title,
+            "meetingVenue": m.meeting_venue,
+            "provider": m.provider,
+            "location": m.location,
+            "allDay": m.all_day,
+            "fromDatetime": m.from_datetime.isoformat(),
+            "toDatetime": m.to_datetime.isoformat(),
+            "host": m.host.full_name if m.host else "—",
+            "hostId": m.host.id if m.host else None,
+            "participants": [{"id": p.id, "fullName": p.full_name} for p in m.participants.all()],
+            "relatedType": m.related_type,
+            "relatedLead": {"id": m.related_lead.id, "name": m.related_lead.full_name} if m.related_lead else None,
+            "relatedCustomer": {"id": m.related_customer.id, "name": m.related_customer.company_name} if m.related_customer else None,
+            "repeat": m.repeat,
+            "createdAt": m.created_at.isoformat(),
+        })
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['GET'])
+def view_single_meeting(request, id):
+    meeting = get_object_or_404(
+        Meeting.objects.select_related("host", "related_lead", "related_customer").prefetch_related("participants"),
+        id=id
+    )
+
+    data = {
+        "id": meeting.id,
+        "title": meeting.title,
+        "meetingVenue": meeting.meeting_venue,
+        "provider": meeting.provider,
+        "location": meeting.location,
+        "allDay": meeting.all_day,
+        "fromDatetime": meeting.from_datetime.isoformat(),
+        "toDatetime": meeting.to_datetime.isoformat(),
+        "host": meeting.host.full_name if meeting.host else "—",
+        "hostId": meeting.host.id if meeting.host else None,
+        "participants": [{"id": p.id, "fullName": p.full_name} for p in meeting.participants.all()],
+        "relatedType": meeting.related_type,
+        "relatedLead": {"id": meeting.related_lead.id, "name": meeting.related_lead.full_name} if meeting.related_lead else None,
+        "relatedCustomer": {"id": meeting.related_customer.id, "name": meeting.related_customer.company_name} if meeting.related_customer else None,
+        "repeat": meeting.repeat,
+        "createdAt": meeting.created_at.isoformat(),
+    }
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['PUT'])
+def update_meeting(request, id):
+    try:
+        meeting = Meeting.objects.get(id=id)
+    except Meeting.DoesNotExist:
+        return HttpResponse("Meeting not found", status=404)
+
+    try:
+        meeting.title = request.data.get("title") or meeting.title
+        meeting.meeting_venue = request.data.get("meeting_venue") or meeting.meeting_venue
+        meeting.repeat = request.data.get("repeat") or meeting.repeat
+
+        venue = meeting.meeting_venue
+        if venue == "online":
+            meeting.provider = request.data.get("provider") or meeting.provider
+            meeting.location = ""
+            meeting.all_day = False
+        else:
+            meeting.location = request.data.get("location") or meeting.location
+            meeting.all_day = request.data.get("all_day", meeting.all_day)
+            meeting.provider = ""
+
+        from_datetime = request.data.get("from_datetime")
+        if from_datetime:
+            meeting.from_datetime = from_datetime
+
+        to_datetime = request.data.get("to_datetime")
+        if to_datetime:
+            meeting.to_datetime = to_datetime
+
+        host_id = request.data.get("host")
+        if host_id:
+            meeting.host_id = host_id
+        else:
+            meeting.host = None
+
+        related_type = request.data.get("related_type")
+        if related_type:
+            meeting.related_type = related_type
+            if related_type == "lead":
+                meeting.related_lead_id = request.data.get("related_lead") or None
+                meeting.related_customer = None
+            elif related_type == "customer":
+                meeting.related_customer_id = request.data.get("related_customer") or None
+                meeting.related_lead = None
+            else:
+                meeting.related_lead = None
+                meeting.related_customer = None
+
+        meeting.save()
+
+        participant_ids = request.data.get("participants")
+        if participant_ids is not None:
+            meeting.participants.set(participant_ids)
+
+        return HttpResponse("Meeting updated successfully", status=200)
+
+    except Exception as e:
+        print("UPDATE MEETING ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['DELETE'])
+def delete_meeting(request, id):
+    try:
+        meeting = Meeting.objects.get(id=id)
+        meeting.delete()
+        return JsonResponse({"message": "Meeting deleted successfully"})
+    except Meeting.DoesNotExist:
+        return HttpResponse("Meeting not found", status=404)
