@@ -7,7 +7,7 @@ from django.db.models.functions import TruncWeek
 from django.db.models import Count
 from django.db import transaction
 
-from AdminApp.models import Accounts, Address, Customer, Deal, Lead, Meeting, PicklistOption, QuoteProduct, Quotes, Staff, Task
+from AdminApp.models import Accounts, Address, Call, Customer, Deal, Lead, Meeting, PicklistOption, PriceBook, PriceBookItem, Product, QuoteProduct, Quotes, Staff, Task, Vendor
 
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
@@ -1552,4 +1552,700 @@ def delete_meeting(request, id):
         meeting.delete()
         return JsonResponse({"message": "Meeting deleted successfully"})
     except Meeting.DoesNotExist:
-        return HttpResponse("Meeting not found", status=404)
+        return HttpResponse("Meeting not found", status=404)  
+    
+
+
+# ................ calls ....................
+@api_view(['POST'])
+def add_call(request):
+    subject = request.data.get("subject")
+    call_type = request.data.get("call_type")
+    status = request.data.get("status", "scheduled")
+    start_time = request.data.get("start_time")
+    duration = request.data.get("duration")
+    notes = request.data.get("notes", "")
+    assigned_to_id = request.data.get("assigned_to")
+    related_type = request.data.get("related_type", "none")
+    related_lead_id = request.data.get("related_lead")
+    related_contact_id = request.data.get("related_contact")
+    related_deal_id = request.data.get("related_deal")
+
+    if not subject or not call_type or not start_time or not duration:
+        return HttpResponse("Subject, call_type, start_time and duration are required", status=400)
+
+    try:
+        call = Call.objects.create(
+            subject=subject,
+            call_type=call_type,
+            status=status,
+            start_time=start_time,
+            duration=duration,
+            notes=notes,
+            assigned_to_id=assigned_to_id or None,
+            lead_id=related_lead_id if related_type == "lead" else None,
+            contact_id=related_contact_id if related_type == "contact" else None,
+            deal_id=related_deal_id if related_type == "deal" else None,
+        )
+
+        return HttpResponse("Call created successfully", status=201)
+
+    except Exception as e:
+        print("ADD CALL ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['GET'])
+def view_calls(request):
+    calls = Call.objects.select_related(
+        "assigned_to", "lead", "contact", "deal"
+    ).all().order_by("-start_time")
+
+    data = []
+    for c in calls:
+        data.append({
+            "id": c.id,
+            "subject": c.subject,
+            "callType": c.call_type,
+            "status": c.status,
+            "startTime": c.start_time.isoformat(),
+            "duration": c.duration,
+            "notes": c.notes,
+            "assignedTo": c.assigned_to.full_name if c.assigned_to else "—",
+            "assignedToId": c.assigned_to.id if c.assigned_to else None,
+            "relatedType": "lead" if c.lead else "contact" if c.contact else "deal" if c.deal else "none",
+            "relatedLead": {"id": c.lead.id, "name": c.lead.full_name} if c.lead else None,
+            "relatedContact": {"id": c.contact.id, "name": c.contact.company_name} if c.contact else None,
+            "relatedDeal": {"id": c.deal.id, "name": c.deal.deal_name} if c.deal else None,
+            "createdAt": c.created_at.isoformat(),
+        })
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['GET'])
+def view_single_call(request, id):
+    call = get_object_or_404(
+        Call.objects.select_related("assigned_to", "lead", "contact", "deal"),
+        id=id
+    )
+
+    data = {
+        "id": call.id,
+        "subject": call.subject,
+        "callType": call.call_type,
+        "status": call.status,
+        "startTime": call.start_time.isoformat(),
+        "duration": call.duration,
+        "notes": call.notes,
+        "assignedTo": call.assigned_to.full_name if call.assigned_to else "—",
+        "assignedToId": call.assigned_to.id if call.assigned_to else None,
+        "relatedType": "lead" if call.lead else "contact" if call.contact else "deal" if call.deal else "none",
+        "relatedLead": {"id": call.lead.id, "name": call.lead.full_name} if call.lead else None,
+        "relatedContact": {"id": call.contact.id, "name": call.contact.company_name} if call.contact else None,
+        "relatedDeal": {"id": call.deal.id, "name": call.deal.deal_name} if call.deal else None,
+        "createdAt": call.created_at.isoformat(),
+    }
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['PUT'])
+def update_call(request, id):
+    try:
+        call = Call.objects.get(id=id)
+    except Call.DoesNotExist:
+        return HttpResponse("Call not found", status=404)
+
+    try:
+        call.subject = request.data.get("subject") or call.subject
+        call.call_type = request.data.get("call_type") or call.call_type
+        call.status = request.data.get("status") or call.status
+        call.notes = request.data.get("notes", call.notes)
+
+        start_time = request.data.get("start_time")
+        if start_time:
+            call.start_time = start_time
+
+        duration = request.data.get("duration")
+        if duration:
+            call.duration = duration
+
+        assigned_to_id = request.data.get("assigned_to")
+        if assigned_to_id:
+            call.assigned_to_id = assigned_to_id
+        else:
+            call.assigned_to = None
+
+        related_type = request.data.get("related_type")
+        if related_type:
+            call.lead = None
+            call.contact = None
+            call.deal = None
+            if related_type == "lead":
+                call.lead_id = request.data.get("related_lead") or None
+            elif related_type == "contact":
+                call.contact_id = request.data.get("related_contact") or None
+            elif related_type == "deal":
+                call.deal_id = request.data.get("related_deal") or None
+
+        call.save()
+        return HttpResponse("Call updated successfully", status=200)
+
+    except Exception as e:
+        print("UPDATE CALL ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['DELETE'])
+def delete_call(request, id):
+    try:
+        call = Call.objects.get(id=id)
+        call.delete()
+        return JsonResponse({"message": "Call deleted successfully"})
+    except Call.DoesNotExist:
+        return HttpResponse("Call not found", status=404)
+    
+
+
+# .............. vendor ................
+@api_view(['POST'])
+def add_vendor(request):
+    vendor_name = request.data.get("vendor_name")
+    vendor_code = request.data.get("vendor_code")
+    contact_person = request.data.get("contact_person", "")
+    email = request.data.get("email", "")
+    phone = request.data.get("phone", "")
+    mobile = request.data.get("mobile", "")
+    website = request.data.get("website", "")
+    gst_number = request.data.get("gst_number", "")
+    address = request.data.get("address", "")
+    city = request.data.get("city", "")
+    state = request.data.get("state", "")
+    country = request.data.get("country", "")
+    postal_code = request.data.get("postal_code", "")
+    status = request.data.get("status", "active")
+    notes = request.data.get("notes", "")
+
+    if not vendor_name or not vendor_code:
+        return HttpResponse("Vendor name and vendor code are required", status=400)
+
+    if Vendor.objects.filter(vendor_code=vendor_code).exists():
+        return HttpResponse("Vendor code already exists", status=400)
+
+    try:
+        Vendor.objects.create(
+            vendor_name=vendor_name,
+            vendor_code=vendor_code,
+            contact_person=contact_person,
+            email=email,
+            phone=phone,
+            mobile=mobile,
+            website=website,
+            gst_number=gst_number,
+            address=address,
+            city=city,
+            state=state,
+            country=country,
+            postal_code=postal_code,
+            status=status,
+            notes=notes,
+        )
+        return HttpResponse("Vendor created successfully", status=201)
+
+    except Exception as e:
+        print("ADD VENDOR ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['GET'])
+def view_vendors(request):
+    vendors = Vendor.objects.all().order_by("-updated_at")
+
+    data = []
+    for v in vendors:
+        data.append({
+            "id": v.id,
+            "vendorName": v.vendor_name,
+            "vendorCode": v.vendor_code,
+            "contactPerson": v.contact_person,
+            "email": v.email,
+            "phone": v.phone,
+            "mobile": v.mobile,
+            "website": v.website,
+            "gstNumber": v.gst_number,
+            "address": v.address,
+            "city": v.city,
+            "state": v.state,
+            "country": v.country,
+            "postalCode": v.postal_code,
+            "status": v.status,
+            "notes": v.notes,
+            "createdAt": v.created_at.isoformat(),
+            "updatedAt": v.updated_at.isoformat(),
+        })
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['GET'])
+def view_single_vendor(request, id):
+    vendor = get_object_or_404(Vendor, id=id)
+
+    data = {
+        "id": vendor.id,
+        "vendorName": vendor.vendor_name,
+        "vendorCode": vendor.vendor_code,
+        "contactPerson": vendor.contact_person,
+        "email": vendor.email,
+        "phone": vendor.phone,
+        "mobile": vendor.mobile,
+        "website": vendor.website,
+        "gstNumber": vendor.gst_number,
+        "address": vendor.address,
+        "city": vendor.city,
+        "state": vendor.state,
+        "country": vendor.country,
+        "postalCode": vendor.postal_code,
+        "status": vendor.status,
+        "notes": vendor.notes,
+        "createdAt": vendor.created_at.isoformat(),
+        "updatedAt": vendor.updated_at.isoformat(),
+    }
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['PUT'])
+def update_vendor(request, id):
+    try:
+        vendor = Vendor.objects.get(id=id)
+    except Vendor.DoesNotExist:
+        return HttpResponse("Vendor not found", status=404)
+
+    try:
+        vendor.vendor_name = request.data.get("vendor_name") or vendor.vendor_name
+        vendor.contact_person = request.data.get("contact_person", vendor.contact_person)
+        vendor.email = request.data.get("email", vendor.email)
+        vendor.phone = request.data.get("phone", vendor.phone)
+        vendor.mobile = request.data.get("mobile", vendor.mobile)
+        vendor.website = request.data.get("website", vendor.website)
+        vendor.gst_number = request.data.get("gst_number", vendor.gst_number)
+        vendor.address = request.data.get("address", vendor.address)
+        vendor.city = request.data.get("city", vendor.city)
+        vendor.state = request.data.get("state", vendor.state)
+        vendor.country = request.data.get("country", vendor.country)
+        vendor.postal_code = request.data.get("postal_code", vendor.postal_code)
+        vendor.status = request.data.get("status", vendor.status)
+        vendor.notes = request.data.get("notes", vendor.notes)
+
+        # vendor_code is unique — only update if provided and different
+        new_code = request.data.get("vendor_code")
+        if new_code and new_code != vendor.vendor_code:
+            if Vendor.objects.filter(vendor_code=new_code).exists():
+                return HttpResponse("Vendor code already exists", status=400)
+            vendor.vendor_code = new_code
+
+        vendor.save()
+        return HttpResponse("Vendor updated successfully", status=200)
+
+    except Exception as e:
+        print("UPDATE VENDOR ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['DELETE'])
+def delete_vendor(request, id):
+    try:
+        vendor = Vendor.objects.get(id=id)
+        vendor.delete()
+        return JsonResponse({"message": "Vendor deleted successfully"})
+    except Vendor.DoesNotExist:
+        return HttpResponse("Vendor not found", status=404)
+    
+
+
+# .............. products ................
+@api_view(['POST'])
+def add_product(request):
+    name = request.data.get("name")
+    product_code = request.data.get("product_code")
+    sku = request.data.get("sku")
+    product_type = request.data.get("product_type", "goods")
+    category = request.data.get("category", "")
+    manufacturer = request.data.get("manufacturer", "")
+    vendor_id = request.data.get("vendor_id")
+    unit_price = request.data.get("unit_price")
+    cost_price = request.data.get("cost_price", 0)
+    tax_percentage = request.data.get("tax_percentage", 0)
+    quantity_in_stock = request.data.get("quantity_in_stock", 0)
+    reorder_level = request.data.get("reorder_level", 0)
+    unit = request.data.get("unit", "Nos")
+    description = request.data.get("description", "")
+    status = request.data.get("status", "active")
+
+    if not name or not product_code or not sku or not unit_price:
+        return HttpResponse("Name, product_code, sku and unit_price are required", status=400)
+
+    if Product.objects.filter(product_code=product_code).exists():
+        return HttpResponse("Product code already exists", status=400)
+
+    if Product.objects.filter(sku=sku).exists():
+        return HttpResponse("SKU already exists", status=400)
+
+    try:
+        Product.objects.create(
+            name=name,
+            product_code=product_code,
+            sku=sku,
+            product_type=product_type,
+            category=category,
+            manufacturer=manufacturer,
+            vendor_id=vendor_id or None,
+            unit_price=unit_price,
+            cost_price=cost_price,
+            tax_percentage=tax_percentage,
+            quantity_in_stock=quantity_in_stock,
+            reorder_level=reorder_level,
+            unit=unit,
+            description=description,
+            status=status,
+        )
+        return HttpResponse("Product created successfully", status=201)
+
+    except Exception as e:
+        print("ADD PRODUCT ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['GET'])
+def view_products(request):
+    products = Product.objects.select_related("vendor").all()
+
+    data = []
+    for p in products:
+        data.append({
+            "id": p.id,
+            "name": p.name,
+            "productCode": p.product_code,
+            "sku": p.sku,
+            "productType": p.product_type,
+            "category": p.category,
+            "manufacturer": p.manufacturer,
+            "vendor": p.vendor.vendor_name if p.vendor else "—",
+            "vendorId": p.vendor.id if p.vendor else None,
+            "unitPrice": float(p.unit_price),
+            "costPrice": float(p.cost_price),
+            "taxPercentage": float(p.tax_percentage),
+            "quantityInStock": p.quantity_in_stock,
+            "reorderLevel": p.reorder_level,
+            "unit": p.unit,
+            "description": p.description,
+            "status": p.status,
+            "createdAt": p.created_at.isoformat(),
+            "updatedAt": p.updated_at.isoformat(),
+        })
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['GET'])
+def view_single_product(request, id):
+    product = get_object_or_404(Product.objects.select_related("vendor"), id=id)
+
+    data = {
+        "id": product.id,
+        "name": product.name,
+        "productCode": product.product_code,
+        "sku": product.sku,
+        "productType": product.product_type,
+        "category": product.category,
+        "manufacturer": product.manufacturer,
+        "vendor": product.vendor.vendor_name if product.vendor else "—",
+        "vendorId": product.vendor.id if product.vendor else None,
+        "unitPrice": float(product.unit_price),
+        "costPrice": float(product.cost_price),
+        "taxPercentage": float(product.tax_percentage),
+        "quantityInStock": product.quantity_in_stock,
+        "reorderLevel": product.reorder_level,
+        "unit": product.unit,
+        "description": product.description,
+        "status": product.status,
+        "createdAt": product.created_at.isoformat(),
+        "updatedAt": product.updated_at.isoformat(),
+    }
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['PUT'])
+def update_product(request, id):
+    try:
+        product = Product.objects.get(id=id)
+    except Product.DoesNotExist:
+        return HttpResponse("Product not found", status=404)
+
+    try:
+        product.name = request.data.get("name") or product.name
+        product.product_type = request.data.get("product_type", product.product_type)
+        product.category = request.data.get("category", product.category)
+        product.manufacturer = request.data.get("manufacturer", product.manufacturer)
+        product.unit_price = request.data.get("unit_price") or product.unit_price
+        product.cost_price = request.data.get("cost_price", product.cost_price)
+        product.tax_percentage = request.data.get("tax_percentage", product.tax_percentage)
+        product.quantity_in_stock = request.data.get("quantity_in_stock", product.quantity_in_stock)
+        product.reorder_level = request.data.get("reorder_level", product.reorder_level)
+        product.unit = request.data.get("unit", product.unit)
+        product.description = request.data.get("description", product.description)
+        product.status = request.data.get("status", product.status)
+
+        vendor_id = request.data.get("vendor_id")
+        if vendor_id:
+            product.vendor_id = vendor_id
+        elif vendor_id == "":
+            product.vendor = None
+
+        # product_code — only update if different
+        new_code = request.data.get("product_code")
+        if new_code and new_code != product.product_code:
+            if Product.objects.filter(product_code=new_code).exists():
+                return HttpResponse("Product code already exists", status=400)
+            product.product_code = new_code
+
+        # sku — only update if different
+        new_sku = request.data.get("sku")
+        if new_sku and new_sku != product.sku:
+            if Product.objects.filter(sku=new_sku).exists():
+                return HttpResponse("SKU already exists", status=400)
+            product.sku = new_sku
+
+        product.save()
+        return HttpResponse("Product updated successfully", status=200)
+
+    except Exception as e:
+        print("UPDATE PRODUCT ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['DELETE'])
+def delete_product(request, id):
+    try:
+        product = Product.objects.get(id=id)
+        product.delete()
+        return JsonResponse({"message": "Product deleted successfully"})
+    except Product.DoesNotExist:
+        return HttpResponse("Product not found", status=404)
+    
+
+
+# ---------------- PRICE BOOK ----------------
+@api_view(['POST'])
+def add_price_book(request):
+    name = request.data.get("name")
+    description = request.data.get("description", "")
+    status = request.data.get("status", "active")
+
+    if not name:
+        return HttpResponse("Name is required", status=400)
+
+    if PriceBook.objects.filter(name=name).exists():
+        return HttpResponse("Price book name already exists", status=400)
+
+    try:
+        PriceBook.objects.create(
+            name=name,
+            description=description,
+            status=status,
+        )
+        return HttpResponse("Price book created successfully", status=201)
+
+    except Exception as e:
+        print("ADD PRICE BOOK ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['GET'])
+def view_price_books(request):
+    price_books = PriceBook.objects.all()
+
+    data = []
+    for pb in price_books:
+        data.append({
+            "id": pb.id,
+            "name": pb.name,
+            "description": pb.description,
+            "status": pb.status,
+            "itemCount": pb.items.count(),
+            "createdAt": pb.created_at.isoformat(),
+            "updatedAt": pb.updated_at.isoformat(),
+        })
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['GET'])
+def view_single_price_book(request, id):
+    price_book = get_object_or_404(PriceBook, id=id)
+
+    items = []
+    for item in price_book.items.select_related("product").all():
+        items.append({
+            "id": item.id,
+            "productId": item.product.id,
+            "productName": item.product.name,
+            "productCode": item.product.product_code,
+            "price": float(item.price),
+        })
+
+    data = {
+        "id": price_book.id,
+        "name": price_book.name,
+        "description": price_book.description,
+        "status": price_book.status,
+        "items": items,
+        "createdAt": price_book.created_at.isoformat(),
+        "updatedAt": price_book.updated_at.isoformat(),
+    }
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['PUT'])
+def update_price_book(request, id):
+    try:
+        price_book = PriceBook.objects.get(id=id)
+    except PriceBook.DoesNotExist:
+        return HttpResponse("Price book not found", status=404)
+
+    try:
+        new_name = request.data.get("name")
+        if new_name and new_name != price_book.name:
+            if PriceBook.objects.filter(name=new_name).exists():
+                return HttpResponse("Price book name already exists", status=400)
+            price_book.name = new_name
+
+        price_book.description = request.data.get("description", price_book.description)
+        price_book.status = request.data.get("status", price_book.status)
+
+        price_book.save()
+        return HttpResponse("Price book updated successfully", status=200)
+
+    except Exception as e:
+        print("UPDATE PRICE BOOK ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['DELETE'])
+def delete_price_book(request, id):
+    try:
+        price_book = PriceBook.objects.get(id=id)
+        price_book.delete()
+        return JsonResponse({"message": "Price book deleted successfully"})
+    except PriceBook.DoesNotExist:
+        return HttpResponse("Price book not found", status=404)
+
+
+# ---------------- PRICE BOOK ITEM ----------------
+@api_view(['POST'])
+def add_price_book_item(request):
+    price_book_id = request.data.get("price_book_id")
+    product_id = request.data.get("product_id")
+    price = request.data.get("price")
+
+    if not price_book_id or not product_id or price is None:
+        return HttpResponse("price_book_id, product_id and price are required", status=400)
+
+    price_book = get_object_or_404(PriceBook, id=price_book_id)
+    product = get_object_or_404(Product, id=product_id)
+
+    if PriceBookItem.objects.filter(price_book=price_book, product=product).exists():
+        return HttpResponse("This product already exists in the price book", status=400)
+
+    try:
+        PriceBookItem.objects.create(
+            price_book=price_book,
+            product=product,
+            price=price,
+        )
+        return HttpResponse("Price book item created successfully", status=201)
+
+    except Exception as e:
+        print("ADD PRICE BOOK ITEM ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['GET'])
+def view_price_book_items(request):
+    items = PriceBookItem.objects.select_related("price_book", "product").all()
+
+    price_book_id = request.query_params.get("price_book_id")
+    if price_book_id:
+        items = items.filter(price_book_id=price_book_id)
+
+    data = []
+    for item in items:
+        data.append({
+            "id": item.id,
+            "priceBookId": item.price_book.id,
+            "priceBookName": item.price_book.name,
+            "productId": item.product.id,
+            "productName": item.product.name,
+            "productCode": item.product.product_code,
+            "price": float(item.price),
+        })
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['GET'])
+def view_single_price_book_item(request, id):
+    item = get_object_or_404(PriceBookItem.objects.select_related("price_book", "product"), id=id)
+
+    data = {
+        "id": item.id,
+        "priceBookId": item.price_book.id,
+        "priceBookName": item.price_book.name,
+        "productId": item.product.id,
+        "productName": item.product.name,
+        "productCode": item.product.product_code,
+        "price": float(item.price),
+    }
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['PUT'])
+def update_price_book_item(request, id):
+    try:
+        item = PriceBookItem.objects.get(id=id)
+    except PriceBookItem.DoesNotExist:
+        return HttpResponse("Price book item not found", status=404)
+
+    try:
+        new_product_id = request.data.get("product_id")
+        if new_product_id and int(new_product_id) != item.product_id:
+            product = get_object_or_404(Product, id=new_product_id)
+            if PriceBookItem.objects.filter(price_book=item.price_book, product=product).exists():
+                return HttpResponse("This product already exists in the price book", status=400)
+            item.product = product
+
+        price = request.data.get("price")
+        if price is not None:
+            item.price = price
+
+        item.save()
+        return HttpResponse("Price book item updated successfully", status=200)
+
+    except Exception as e:
+        print("UPDATE PRICE BOOK ITEM ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['DELETE'])
+def delete_price_book_item(request, id):
+    try:
+        item = PriceBookItem.objects.get(id=id)
+        item.delete()
+        return JsonResponse({"message": "Price book item deleted successfully"})
+    except PriceBookItem.DoesNotExist:
+        return HttpResponse("Price book item not found", status=404)

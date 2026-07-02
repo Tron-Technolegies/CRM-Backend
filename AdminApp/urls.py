@@ -65,4 +65,35 @@ urlpatterns= [
     path('meeting/single/view/<int:id>/', views.view_single_meeting, name='meeting-single'),
     path('meeting/update/<int:id>/', views.update_meeting, name='meeting-update'),
     path('meeting/delete/<int:id>/', views.delete_meeting, name='meeting-delete'),
+
+    path('call/add/', views.add_call, name='call-add'),
+    path('call/view/', views.view_calls, name='call-view'),
+    path('call/single/view/<int:id>/', views.view_single_call, name='call-single'),
+    path('call/update/<int:id>/', views.update_call, name='call-update'),
+    path('call/delete/<int:id>/', views.delete_call, name='call-delete'),
+
+    path('vendor/add/', views.add_vendor, name='vendor-add'),
+    path('vendor/view/', views.view_vendors, name='vendor-view'),
+    path('vendor/single/view/<int:id>/', views.view_single_vendor, name='vendor-single'),
+    path('vendor/update/<int:id>/', views.update_vendor, name='vendor-update'),
+    path('vendor/delete/<int:id>/', views.delete_vendor, name='vendor-delete'),
+
+    path('product/add/', views.add_product, name='product-add'),
+    path('product/view/', views.view_products, name='product-view'),
+    path('product/single/view/<int:id>/', views.view_single_product, name='product-single'),
+    path('product/update/<int:id>/', views.update_product, name='product-update'),
+    path('product/delete/<int:id>/', views.delete_product, name='product-delete'),
+
+    path('pricebooks/add/', views.add_price_book, name='add_price_book'),
+    path('pricebooks/view/', views.view_price_books, name='view_price_books'),
+    path('pricebooks/single/view/<int:id>/', views.view_single_price_book, name='view_single_price_book'),
+    path('pricebooks/update/<int:id>/', views.update_price_book, name='update_price_book'),
+    path('pricebooks/delete/<int:id>/', views.delete_price_book, name='delete_price_book'),
+
+    path('pricebook/items/add/', views.add_price_book_item, name='add_price_book_item'),
+    path('pricebook/items/view/', views.view_price_book_items, name='view_price_book_items'),
+    path('pricebook/items/single/view/<int:id>/', views.view_single_price_book_item, name='view_single_price_book_item'),
+    path('pricebook/items/update/<int:id>/', views.update_price_book_item, name='update_price_book_item'),
+    path('pricebook/items/delete/<int:id>/', views.delete_price_book_item, name='delete_price_book_item'),
+
 ]

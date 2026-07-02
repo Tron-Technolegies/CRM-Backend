@@ -344,3 +344,137 @@ class Meeting(models.Model):
 
     def __str__(self):
         return self.title
+
+
+
+class Call(models.Model):
+    CALL_TYPE = [
+        ("inbound", "Inbound"),
+        ("outbound", "Outbound"),
+    ]
+
+    STATUS = [
+        ("scheduled", "Scheduled"),
+        ("completed", "Completed"),
+        ("missed", "Missed"),
+        ("cancelled", "Cancelled"),
+    ]
+
+    subject = models.CharField(max_length=200)
+    call_type = models.CharField(max_length=20, choices=CALL_TYPE)
+    status = models.CharField(max_length=20, choices=STATUS, default="scheduled")
+    start_time = models.DateTimeField()
+    duration = models.PositiveIntegerField(help_text="Duration in minutes")
+    notes = models.TextField(blank=True)
+
+    assigned_to = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="calls")
+
+    lead = models.ForeignKey(Lead, null=True, blank=True, on_delete=models.SET_NULL, related_name="calls")
+    contact = models.ForeignKey(Customer, null=True, blank=True, on_delete=models.SET_NULL, related_name="calls")
+    deal = models.ForeignKey(Deal, null=True, blank=True, on_delete=models.SET_NULL, related_name="calls")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.subject
+    
+
+
+class Vendor(models.Model):
+    STATUS_CHOICES = [
+        ("active", "Active"),
+        ("inactive", "Inactive"),
+    ]
+
+    vendor_name = models.CharField(max_length=255)
+    vendor_code = models.CharField(max_length=50, unique=True)
+    contact_person = models.CharField( max_length=255, blank=True, null=True)
+    email = models.EmailField( blank=True, null=True)
+    phone = models.CharField( max_length=20, blank=True, null=True)
+    mobile = models.CharField( max_length=20, blank=True, null=True)
+    website = models.URLField( blank=True, null=True)
+    gst_number = models.CharField( max_length=30, blank=True, null=True)
+    address = models.TextField( blank=True, null=True)
+    city = models.CharField( max_length=100, blank=True, null=True)
+    state = models.CharField( max_length=100, blank=True, null=True)
+    country = models.CharField( max_length=100, blank=True, null=True)
+    postal_code = models.CharField( max_length=20, blank=True, null=True)
+    status = models.CharField( max_length=20, choices=STATUS_CHOICES, default="active")
+    notes = models.TextField( blank=True, null=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.vendor_name
+    
+
+
+class Product(models.Model):
+    PRODUCT_TYPE = [
+        ("goods", "Goods"),
+        ("service", "Service"),
+    ]
+
+    STATUS = [
+        ("active", "Active"),
+        ("inactive", "Inactive"),
+    ]
+
+    name = models.CharField(max_length=255)
+    product_code = models.CharField(max_length=50, unique=True)
+    sku = models.CharField(max_length=100, unique=True)
+    product_type = models.CharField( max_length=20, choices=PRODUCT_TYPE, default="goods")
+    category = models.CharField(max_length=100, blank=True, null=True)
+    manufacturer = models.CharField(max_length=255, blank=True, null=True)
+
+    vendor = models.ForeignKey( "Vendor", on_delete=models.SET_NULL, null=True, blank=True, related_name="products")
+
+    unit_price = models.DecimalField( max_digits=12, decimal_places=2)
+    cost_price = models.DecimalField( max_digits=12, decimal_places=2, default=0)
+    tax_percentage = models.DecimalField( max_digits=5, decimal_places=2, default=0)
+    quantity_in_stock = models.PositiveIntegerField(default=0)
+    reorder_level = models.PositiveIntegerField(default=0)
+    unit = models.CharField( max_length=50, default="Nos")
+    description = models.TextField(blank=True, null=True)
+    status = models.CharField( max_length=20, choices=STATUS, default="active")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+    
+
+
+class PriceBook(models.Model):
+    STATUS_CHOICES = [
+        ("active", "Active"),
+        ("inactive", "Inactive"),
+    ]
+
+    name = models.CharField(max_length=100, unique=True)
+    description = models.TextField(blank=True, null=True)
+    status = models.CharField( max_length=20, choices=STATUS_CHOICES, default="active")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.name
+    
+class PriceBookItem(models.Model):
+    
+    price_book = models.ForeignKey( PriceBook, on_delete=models.CASCADE, related_name="items")
+    product = models.ForeignKey( Product, on_delete=models.CASCADE, related_name="price_book_items")
+    price = models.DecimalField( max_digits=10, decimal_places=2)
+
+    class Meta:
+        unique_together = ("price_book", "product")
+
+    def __str__(self):
+        return f"{self.price_book.name} - {self.product.name}"
