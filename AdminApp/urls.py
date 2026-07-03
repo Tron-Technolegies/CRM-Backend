@@ -96,4 +96,11 @@ urlpatterns= [
     path('pricebook/items/update/<int:id>/', views.update_price_book_item, name='update_price_book_item'),
     path('pricebook/items/delete/<int:id>/', views.delete_price_book_item, name='delete_price_book_item'),
 
+    path('salesorder/add/', views.add_sales_order, name='sales-order-add'),
+    path('salesorder/view/', views.view_sales_orders, name='sales-order-view'),
+    path('salesorder/single/view/<int:id>/', views.view_single_sales_order, name='sales-order-single'),
+    path('salesorder/update/<int:id>/', views.update_sales_order, name='sales-order-update'),
+    path('salesorder/delete/<int:id>/', views.delete_sales_order, name='sales-order-delete'),
+    path('salesorder/quote-prefill/<int:quote_id>/', views.get_quote_prefill, name='sales-order-quote-prefill'),
+
 ]

@@ -237,6 +237,46 @@ class Accounts(models.Model):
 
 
 
+class Product(models.Model):
+    PRODUCT_TYPE = [
+        ("goods", "Goods"),
+        ("service", "Service"),
+    ]
+
+    STATUS = [
+        ("active", "Active"),
+        ("inactive", "Inactive"),
+    ]
+
+    name = models.CharField(max_length=255)
+    product_code = models.CharField(max_length=50, unique=True)
+    sku = models.CharField(max_length=100, unique=True)
+    product_type = models.CharField( max_length=20, choices=PRODUCT_TYPE, default="goods")
+    category = models.CharField(max_length=100, blank=True, null=True)
+    manufacturer = models.CharField(max_length=255, blank=True, null=True)
+
+    vendor = models.ForeignKey( "Vendor", on_delete=models.SET_NULL, null=True, blank=True, related_name="products")
+
+    unit_price = models.DecimalField( max_digits=12, decimal_places=2)
+    cost_price = models.DecimalField( max_digits=12, decimal_places=2, default=0)
+    tax_percentage = models.DecimalField( max_digits=5, decimal_places=2, default=0)
+    quantity_in_stock = models.PositiveIntegerField(default=0)
+    reorder_level = models.PositiveIntegerField(default=0)
+    unit = models.CharField( max_length=50, default="Nos")
+    description = models.TextField(blank=True, null=True)
+    status = models.CharField( max_length=20, choices=STATUS, default="active")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+
 class Quotes(models.Model):
     QUOTE_STAGE_CHOICES = [
         ('draft', 'Draft'),
@@ -277,7 +317,7 @@ class QuoteProduct(models.Model):
 
     quote = models.ForeignKey(Quotes, on_delete=models.CASCADE, related_name="items")
     
-    product = models.CharField(max_length=255)
+    product = models.ForeignKey( Product, on_delete=models.CASCADE)
     description = models.TextField(blank=True, null=True)
     
     quantity = models.PositiveIntegerField(default=1)
@@ -411,46 +451,6 @@ class Vendor(models.Model):
     
 
 
-class Product(models.Model):
-    PRODUCT_TYPE = [
-        ("goods", "Goods"),
-        ("service", "Service"),
-    ]
-
-    STATUS = [
-        ("active", "Active"),
-        ("inactive", "Inactive"),
-    ]
-
-    name = models.CharField(max_length=255)
-    product_code = models.CharField(max_length=50, unique=True)
-    sku = models.CharField(max_length=100, unique=True)
-    product_type = models.CharField( max_length=20, choices=PRODUCT_TYPE, default="goods")
-    category = models.CharField(max_length=100, blank=True, null=True)
-    manufacturer = models.CharField(max_length=255, blank=True, null=True)
-
-    vendor = models.ForeignKey( "Vendor", on_delete=models.SET_NULL, null=True, blank=True, related_name="products")
-
-    unit_price = models.DecimalField( max_digits=12, decimal_places=2)
-    cost_price = models.DecimalField( max_digits=12, decimal_places=2, default=0)
-    tax_percentage = models.DecimalField( max_digits=5, decimal_places=2, default=0)
-    quantity_in_stock = models.PositiveIntegerField(default=0)
-    reorder_level = models.PositiveIntegerField(default=0)
-    unit = models.CharField( max_length=50, default="Nos")
-    description = models.TextField(blank=True, null=True)
-    status = models.CharField( max_length=20, choices=STATUS, default="active")
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ["name"]
-
-    def __str__(self):
-        return self.name
-    
-
-
 class PriceBook(models.Model):
     STATUS_CHOICES = [
         ("active", "Active"),
@@ -478,3 +478,59 @@ class PriceBookItem(models.Model):
 
     def __str__(self):
         return f"{self.price_book.name} - {self.product.name}"
+    
+
+
+class SalesOrder(models.Model):
+    STATUS_CHOICES = [
+        ("created", "Created"),
+        ("approved", "Approved"),
+        ("delivered", "Delivered"),
+        ("cancelled", "Cancelled"),
+    ]
+
+    owner = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="sales_orders")
+    subject = models.CharField(max_length=255)
+    customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name="sales_orders")
+    quote = models.ForeignKey(Quotes, on_delete=models.SET_NULL, null=True, blank=True, related_name="sales_orders")
+    deal = models.ForeignKey(Deal, on_delete=models.SET_NULL, null=True, blank=True, related_name="sales_orders")  # add this
+    purchase_order_number = models.CharField(max_length=100, blank=True)
+    carrier = models.CharField(max_length=100, blank=True)
+    sales_commission = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    due_date = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="created")
+    excise_duty = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    billing_address = models.OneToOneField(Address, on_delete=models.SET_NULL, null=True, blank=True, related_name="sales_order_billing")
+    shipping_address = models.OneToOneField(Address, on_delete=models.SET_NULL, null=True, blank=True, related_name="sales_order_shipping")
+    terms_and_conditions = models.TextField(blank=True)
+    description = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.subject
+
+    def delete(self, *args, **kwargs):
+        if self.billing_address:
+            self.billing_address.delete()
+        if self.shipping_address:
+            self.shipping_address.delete()
+        super().delete(*args, **kwargs)
+    
+class SalesOrderItem(models.Model):
+    sales_order = models.ForeignKey(SalesOrder, on_delete=models.CASCADE, related_name="items")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT)
+    quantity = models.PositiveIntegerField()
+    list_price = models.DecimalField(max_digits=12, decimal_places=2)
+    discount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    tax = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    line_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    description = models.TextField(blank=True)
+
+    def save(self, *args, **kwargs):
+        self.line_total = (self.list_price * self.quantity) - self.discount + self.tax
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.product.name}"

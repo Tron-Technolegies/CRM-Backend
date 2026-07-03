@@ -7,7 +7,7 @@ from django.db.models.functions import TruncWeek
 from django.db.models import Count
 from django.db import transaction
 
-from AdminApp.models import Accounts, Address, Call, Customer, Deal, Lead, Meeting, PicklistOption, PriceBook, PriceBookItem, Product, QuoteProduct, Quotes, Staff, Task, Vendor
+from AdminApp.models import Accounts, Address, Call, Customer, Deal, Lead, Meeting, PicklistOption, PriceBook, PriceBookItem, Product, QuoteProduct, Quotes, SalesOrder, SalesOrderItem, Staff, Task, Vendor
 
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
@@ -1144,20 +1144,22 @@ def delete_account(request, id):
 # ................. quotes ..................
 # Helper to serialize products
 def _serialize_products(quote):
-    return [
-        {
-            "id": item.id,
-            "product": item.product,
-            "description": item.description,
+    products = []
+
+    for item in quote.items.all():
+        products.append({
+            "product": {
+                "id": item.product.id,
+                "name": item.product.name,
+            },
             "quantity": item.quantity,
             "listPrice": float(item.list_price),
-            "amount": float(item.amount),
             "discount": float(item.discount),
             "tax": float(item.tax),
-            "total": float(item.total),
-        }
-        for item in quote.items.all()
-    ]
+            "lineTotal": float(item.total),
+        })
+
+    return products
 
 # Helper to serialize addresses
 def _serialize_address(addr):
@@ -1217,7 +1219,7 @@ def add_quote(request):
             elif account and account.billing_address:
                 src = account.billing_address
                 billing_address = Address.objects.create(
-                    country=src.country, address=src.address,street_address=src.street_Address, city=src.city, state=src.state, zip_code=src.zip_code
+                    country=src.country, address=src.address,street_address=src.street_address, city=src.city, state=src.state, zip_code=src.zip_code
                 )
 
             shipping_address = None
@@ -1226,7 +1228,7 @@ def add_quote(request):
             elif account and account.shipping_address:
                 src = account.shipping_address
                 shipping_address = Address.objects.create(
-                    country=src.country, address=src.address,street_address=src.street_Address, city=src.city, state=src.state, zip_code=src.zip_code
+                    country=src.country, address=src.address,street_address=src.street_address, city=src.city, state=src.state, zip_code=src.zip_code
                 )
 
             # 2. Save the primary Quote header record
@@ -1244,16 +1246,26 @@ def add_quote(request):
 
             # 3. Create individual QuoteProduct instances safely inside transaction block
             for item in products_data:
+                product = get_object_or_404(Product, id=item.get("product"))
+
+                quantity = int(item.get("quantity", 1))
+                list_price = product.unit_price
+                discount = float(item.get("discount", 0))
+                tax = float(product.tax_percentage)
+
+                amount = quantity * float(list_price)
+                total = (amount - discount) + ((amount - discount) * tax / 100)
+
                 QuoteProduct.objects.create(
                     quote=quote,
-                    product=item.get("product"),
-                    description=item.get("description", ""),
-                    quantity=int(item.get("quantity", 1)),
-                    list_price=item.get("list_price", 0.00),
-                    amount=item.get("amount", 0.00),
-                    discount=item.get("discount", 0.00),
-                    tax=item.get("tax", 0.00),
-                    total=item.get("total", 0.00)
+                    product=product,
+                    description=product.description,
+                    quantity=quantity,
+                    list_price=list_price,
+                    amount=amount,
+                    discount=discount,
+                    tax=tax,
+                    total=total,
                 )
 
         return HttpResponse("Quote and line items created successfully", status=201)
@@ -1279,7 +1291,7 @@ def view_quotes(request):
             "validUntil": str(i.valid_until) if i.valid_until else None,
             "assignedTo": i.assigned_to.full_name if i.assigned_to else "—",
             "dealName": i.deal.deal_name if i.deal else "—",
-            "accountName": i.account.company_name if i.account else None,
+            "accountName": i.account.account_name if i.account else None,
             "billingAddress": _serialize_address(i.billing_address),
             "shippingAddress": _serialize_address(i.shipping_address),
             "products": _serialize_products(i), # Appends the linked items list to the JSON payload
@@ -1333,19 +1345,28 @@ def update_quote(request, id):
             # Dynamic Item Synchronizer Block
             products_data = request.data.get("products")
             if products_data is not None:
-                # Flush out previous line item rows and overwrite cleanly with updated collection list
                 quote.items.all().delete()
                 for item in products_data:
+                    product = get_object_or_404(Product, id=item.get("product"))
+
+                    quantity = int(item.get("quantity", 1))
+                    list_price = product.unit_price
+                    discount = float(item.get("discount", 0))
+                    tax = float(product.tax_percentage)
+
+                    amount = quantity * float(list_price)
+                    total = (amount - discount) + ((amount - discount) * tax / 100)
+
                     QuoteProduct.objects.create(
                         quote=quote,
-                        product=item.get("product"),
-                        description=item.get("description", ""),
-                        quantity=int(item.get("quantity", 1)),
-                        list_price=item.get("list_price", 0.00),
-                        amount=item.get("amount", 0.00),
-                        discount=item.get("discount", 0.00),
-                        tax=item.get("tax", 0.00),
-                        total=item.get("total", 0.00)
+                        product=product,
+                        description=item.get("description", product.description),
+                        quantity=quantity,
+                        list_price=list_price,
+                        amount=amount,
+                        discount=discount,
+                        tax=tax,
+                        total=total,
                     )
 
         return HttpResponse("Quote updated successfully", status=200)
@@ -2249,3 +2270,374 @@ def delete_price_book_item(request, id):
         return JsonResponse({"message": "Price book item deleted successfully"})
     except PriceBookItem.DoesNotExist:
         return HttpResponse("Price book item not found", status=404)
+    
+
+
+# .............. seles orders and item ...............
+def _format_address(address):
+    if not address:
+        return None
+    return {
+        "country": address.country,
+        "address": address.address,
+        "streetAddress": address.street_address,
+        "city": address.city,
+        "state": address.state,
+        "zipCode": address.zip_code,
+    }
+
+def _create_address(data):
+    if not data:
+        return None
+    return Address.objects.create(
+        country=data.get("country", ""),
+        address=data.get("address", ""),
+        street_address=data.get("street_add", ""),
+        city=data.get("city", ""),
+        state=data.get("state", ""),
+        zip_code=data.get("zip_code", ""),
+    )
+
+def _update_address(existing, data):
+    if not data:
+        return existing
+    if existing:
+        existing.country = data.get("country", existing.country)
+        existing.address = data.get("address", existing.address)
+        existing.street_address = data.get("street_add", existing.street_address)
+        existing.city = data.get("city", existing.city)
+        existing.state = data.get("state", existing.state)
+        existing.zip_code = data.get("zip_code", existing.zip_code)
+        existing.save()
+        return existing
+    return _create_address(data)
+
+
+@api_view(['GET'])
+def get_quote_prefill(request, quote_id):
+    """Fetch quote data to prefill sales order form"""
+    quote = get_object_or_404(
+        Quotes.objects.select_related(
+            "assigned_to", "deal", "account",
+            "billing_address", "shipping_address"
+        ),
+        id=quote_id
+    )
+
+    # Get quote items if any (via sales orders linked to this quote)
+    items = []
+
+    return JsonResponse({
+        "subject": quote.subject,
+        "contactName": quote.contact_name,
+        "accountName": quote.account.account_name if quote.account else "",
+        "dealId": quote.deal.id if quote.deal else None,
+        "dealName": quote.deal.deal_name if quote.deal else "",
+        "billingAddress": _format_address(quote.billing_address),
+        "shippingAddress": _format_address(quote.shipping_address),
+    })
+
+
+
+@api_view(['POST'])
+def add_sales_order(request):
+    subject = request.data.get("subject")
+    customer_id = request.data.get("customer_id")
+    owner_id = request.data.get("owner_id")
+    quote_id = request.data.get("quote_id")
+    deal_id = request.data.get("deal_id")
+    purchase_order_number = request.data.get("purchase_order_number", "")
+    carrier = request.data.get("carrier", "")
+    sales_commission = request.data.get("sales_commission", 0)
+    due_date = request.data.get("due_date")
+    status = request.data.get("status", "created")
+    excise_duty = request.data.get("excise_duty", 0)
+    terms_and_conditions = request.data.get("terms_and_conditions", "")
+    description = request.data.get("description", "")
+    billing_data = request.data.get("billing_add")
+    shipping_data = request.data.get("shipping_add")
+    items_data = request.data.get("items", [])
+
+    if not subject or not customer_id:
+        return HttpResponse("Subject and customer are required", status=400)
+
+    try:
+        billing_address = None
+        shipping_address = None
+        quote = None
+
+        # Fetch the quote once if linked, and reuse it for address/deal/items
+        if quote_id:
+            try:
+                quote = Quotes.objects.select_related(
+                    "billing_address", "shipping_address"
+                ).prefetch_related("items").get(id=quote_id)
+            except Quotes.DoesNotExist:
+                quote = None
+
+        # --- Address auto-fill ---
+        if quote and not billing_data and not shipping_data:
+            if quote.billing_address:
+                billing_address = Address.objects.create(
+                    country=quote.billing_address.country,
+                    address=quote.billing_address.address,
+                    street_address=quote.billing_address.street_address,
+                    city=quote.billing_address.city,
+                    state=quote.billing_address.state,
+                    zip_code=quote.billing_address.zip_code,
+                )
+            if quote.shipping_address:
+                shipping_address = Address.objects.create(
+                    country=quote.shipping_address.country,
+                    address=quote.shipping_address.address,
+                    street_address=quote.shipping_address.street_address,
+                    city=quote.shipping_address.city,
+                    state=quote.shipping_address.state,
+                    zip_code=quote.shipping_address.zip_code,
+                )
+        else:
+            billing_address = _create_address(billing_data)
+            shipping_address = _create_address(shipping_data)
+
+        # --- Deal auto-fill ---
+        if quote and not deal_id:
+            deal_id = quote.deal_id  # adjust field name if it's e.g. quote.deal.id
+
+        sales_order = SalesOrder.objects.create(
+            subject=subject,
+            customer_id=customer_id,
+            owner_id=owner_id or None,
+            quote_id=quote_id or None,
+            deal_id=deal_id or None,
+            purchase_order_number=purchase_order_number,
+            carrier=carrier,
+            sales_commission=sales_commission,
+            due_date=due_date or None,
+            status=status,
+            excise_duty=excise_duty,
+            billing_address=billing_address,
+            shipping_address=shipping_address,
+            terms_and_conditions=terms_and_conditions,
+            description=description,
+        )
+
+        # --- Items: use request items if given, else pull from the quote ---
+        if not items_data and quote:
+            items_data = [
+                {
+                    "product_id": qi.product_id,
+                    "quantity": qi.quantity,
+                    "list_price": qi.list_price,
+                    "discount": qi.discount,
+                    "tax": qi.tax,
+                    "description": qi.description,
+                }
+                for qi in quote.items.all()
+            ]
+
+        for item in items_data:
+            quantity = int(item.get("quantity", 1))
+            list_price = float(item.get("list_price", 0))
+            discount = float(item.get("discount", 0))
+            tax = float(item.get("tax", 0))
+
+            SalesOrderItem.objects.create(
+                sales_order=sales_order,
+                product_id=item.get("product_id"),
+                quantity=quantity,
+                list_price=list_price,
+                discount=discount,
+                tax=tax,
+                description=item.get("description", ""),
+            )
+
+        return HttpResponse("Sales order created successfully", status=201)
+
+    except Exception as e:
+        print("ADD SALES ORDER ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['GET'])
+def view_sales_orders(request):
+    orders = SalesOrder.objects.select_related(
+        "owner", "customer", "quote", "deal",
+        "billing_address", "shipping_address"
+    ).prefetch_related("items__product").all().order_by("-updated_at")
+
+    data = []
+    for o in orders:
+        data.append({
+            "id": o.id,
+            "subject": o.subject,
+            "status": o.status,
+            "owner": o.owner.full_name if o.owner else "—",
+            "ownerId": o.owner.id if o.owner else None,
+            "customer": o.customer.company_name,
+            "customerId": o.customer.id,
+            "quote": o.quote.subject if o.quote else "—",
+            "quoteId": o.quote.id if o.quote else None,
+            "deal": o.deal.deal_name if o.deal else "—",
+            "dealId": o.deal.id if o.deal else None,
+            "purchaseOrderNumber": o.purchase_order_number,
+            "carrier": o.carrier,
+            "salesCommission": float(o.sales_commission),
+            "dueDate": str(o.due_date) if o.due_date else None,
+            "exciseDuty": float(o.excise_duty),
+            "billingAddress": _format_address(o.billing_address),
+            "shippingAddress": _format_address(o.shipping_address),
+            "termsAndConditions": o.terms_and_conditions,
+            "description": o.description,
+            "items": [
+                {
+                    "id": item.id,
+                    "productId": item.product.id,
+                    "productName": item.product.name,
+                    "quantity": item.quantity,
+                    "listPrice": float(item.list_price),
+                    "discount": float(item.discount),
+                    "tax": float(item.tax),
+                    "lineTotal": float(item.line_total),
+                    "description": item.description,
+                }
+                for item in o.items.all()
+            ],
+            "createdAt": o.created_at.isoformat(),
+            "updatedAt": o.updated_at.isoformat(),
+        })
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['GET'])
+def view_single_sales_order(request, id):
+    order = get_object_or_404(
+        SalesOrder.objects.select_related(
+            "owner", "customer", "quote", "deal",
+            "billing_address", "shipping_address"
+        ).prefetch_related("items__product"),
+        id=id
+    )
+
+    data = {
+        "id": order.id,
+        "subject": order.subject,
+        "status": order.status,
+        "owner": order.owner.full_name if order.owner else "—",
+        "ownerId": order.owner.id if order.owner else None,
+        "customer": order.customer.company_name,
+        "customerId": order.customer.id,
+        "quote": order.quote.subject if order.quote else "—",
+        "quoteId": order.quote.id if order.quote else None,
+        "deal": order.deal.deal_name if order.deal else "—",
+        "dealId": order.deal.id if order.deal else None,
+        "purchaseOrderNumber": order.purchase_order_number,
+        "carrier": order.carrier,
+        "salesCommission": float(order.sales_commission),
+        "dueDate": str(order.due_date) if order.due_date else None,
+        "exciseDuty": float(order.excise_duty),
+        "billingAddress": _format_address(order.billing_address),
+        "shippingAddress": _format_address(order.shipping_address),
+        "termsAndConditions": order.terms_and_conditions,
+        "description": order.description,
+        "items": [
+            {
+                "id": item.id,
+                "productId": item.product.id,
+                "productName": item.product.name,
+                "quantity": item.quantity,
+                "listPrice": float(item.list_price),
+                "discount": float(item.discount),
+                "tax": float(item.tax),
+                "lineTotal": float(item.line_total),
+                "description": item.description,
+            }
+            for item in order.items.all()
+        ],
+        "createdAt": order.created_at.isoformat(),
+        "updatedAt": order.updated_at.isoformat(),
+    }
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['PUT'])
+def update_sales_order(request, id):
+    try:
+        order = SalesOrder.objects.get(id=id)
+    except SalesOrder.DoesNotExist:
+        return HttpResponse("Sales order not found", status=404)
+
+    try:
+        with transaction.atomic():
+            order.subject = request.data.get("subject") or order.subject
+            order.status = request.data.get("status", order.status)
+            order.purchase_order_number = request.data.get("purchase_order_number", order.purchase_order_number)
+            order.carrier = request.data.get("carrier", order.carrier)
+            order.sales_commission = request.data.get("sales_commission", order.sales_commission)
+            order.excise_duty = request.data.get("excise_duty", order.excise_duty)
+            order.terms_and_conditions = request.data.get("terms_and_conditions", order.terms_and_conditions)
+            order.description = request.data.get("description", order.description)
+
+            due_date = request.data.get("due_date")
+            if due_date:
+                order.due_date = due_date
+
+            owner_id = request.data.get("owner_id")
+            if owner_id:
+                order.owner_id = owner_id
+
+            customer_id = request.data.get("customer_id")
+            if customer_id:
+                order.customer_id = customer_id
+
+            quote_id = request.data.get("quote_id")
+            if quote_id:
+                order.quote_id = quote_id
+
+            deal_id = request.data.get("deal_id")
+            if deal_id:
+                order.deal_id = deal_id
+
+            billing_data = request.data.get("billing_add")
+            order.billing_address = _update_address(order.billing_address, billing_data)
+
+            shipping_data = request.data.get("shipping_add")
+            order.shipping_address = _update_address(order.shipping_address, shipping_data)
+
+            order.save()
+
+            items_data = request.data.get("items")
+            if items_data is not None:
+                order.items.all().delete()
+                for item in items_data:
+                    quantity = int(item.get("quantity", 1))
+                    list_price = float(item.get("list_price", 0))
+                    discount = float(item.get("discount", 0))
+                    tax = float(item.get("tax", 0))
+
+                    SalesOrderItem.objects.create(
+                        sales_order=order,
+                        product_id=item.get("product_id"),
+                        quantity=quantity,
+                        list_price=list_price,
+                        discount=discount,
+                        tax=tax,
+                        description=item.get("description", ""),
+                    )
+
+        return HttpResponse("Sales order updated successfully", status=200)
+
+    except Exception as e:
+        print("UPDATE SALES ORDER ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['DELETE'])
+def delete_sales_order(request, id):
+    try:
+        order = SalesOrder.objects.get(id=id)
+        order.delete()
+        return JsonResponse({"message": "Sales order deleted successfully"})
+    except SalesOrder.DoesNotExist:
+        return HttpResponse("Sales order not found", status=404)
