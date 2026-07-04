@@ -429,25 +429,31 @@ class Vendor(models.Model):
 
     vendor_name = models.CharField(max_length=255)
     vendor_code = models.CharField(max_length=50, unique=True)
-    contact_person = models.CharField( max_length=255, blank=True, null=True)
-    email = models.EmailField( blank=True, null=True)
-    phone = models.CharField( max_length=20, blank=True, null=True)
-    mobile = models.CharField( max_length=20, blank=True, null=True)
-    website = models.URLField( blank=True, null=True)
-    gst_number = models.CharField( max_length=30, blank=True, null=True)
-    address = models.TextField( blank=True, null=True)
-    city = models.CharField( max_length=100, blank=True, null=True)
-    state = models.CharField( max_length=100, blank=True, null=True)
-    country = models.CharField( max_length=100, blank=True, null=True)
-    postal_code = models.CharField( max_length=20, blank=True, null=True)
-    status = models.CharField( max_length=20, choices=STATUS_CHOICES, default="active")
-    notes = models.TextField( blank=True, null=True)
+    contact_person = models.CharField(max_length=255, blank=True, null=True)
+    email = models.EmailField(blank=True, null=True)
+    phone = models.CharField(max_length=20, blank=True, null=True)
+    mobile = models.CharField(max_length=20, blank=True, null=True)
+    website = models.URLField(blank=True, null=True)
+    gst_number = models.CharField(max_length=30, blank=True, null=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="active")
+    notes = models.TextField(blank=True, null=True)
+
+    # Replace flat address fields with structured Address FK
+    address = models.OneToOneField(
+        Address, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="vendor"
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return self.vendor_name
+
+    def delete(self, *args, **kwargs):
+        if self.address:
+            self.address.delete()
+        super().delete(*args, **kwargs)
     
 
 
@@ -534,3 +540,144 @@ class SalesOrderItem(models.Model):
 
     def __str__(self):
         return f"{self.product.name}"
+    
+
+
+class Invoice(models.Model):
+
+    STATUS_CHOICES = [
+        ("draft", "Draft"),
+        ("sent", "Sent"),
+        ("paid", "Paid"),
+        ("overdue", "Overdue"),
+        ("cancelled", "Cancelled"),
+    ]
+
+    owner = models.ForeignKey( Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="invoices")
+    subject = models.CharField(max_length=255)
+    invoice_number = models.CharField( max_length=50, unique=True)
+    customer = models.ForeignKey( Customer, on_delete=models.PROTECT, related_name="invoices")
+    sales_order = models.ForeignKey( SalesOrder, on_delete=models.SET_NULL, null=True, blank=True, related_name="invoices")
+    billing_address = models.OneToOneField( Address, on_delete=models.CASCADE, null=True, blank=True, related_name="invoice_billing")
+    shipping_address = models.OneToOneField( Address, on_delete=models.CASCADE, null=True, blank=True, related_name="invoice_shipping")
+    invoice_date = models.DateField()
+    due_date = models.DateField( null=True, blank=True)
+    purchase_order_number = models.CharField( max_length=100, blank=True)
+    status = models.CharField( max_length=20, choices=STATUS_CHOICES, default="draft")
+    terms_and_conditions = models.TextField(blank=True)
+    description = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        if not self.invoice_number:
+            last_invoice = Invoice.objects.order_by("-id").first()
+
+            if last_invoice:
+                last_number = int(last_invoice.invoice_number.split("-")[-1])
+                next_number = last_number + 1
+            else:
+                next_number = 1
+
+            self.invoice_number = f"INV-{next_number:05d}"
+
+        super().save(*args, **kwargs)
+    def delete(self, *args, **kwargs):
+        if self.billing_address:
+            self.billing_address.delete()
+        if self.shipping_address:
+            self.shipping_address.delete()
+        super().delete(*args, **kwargs)
+    
+class InvoiceItem(models.Model):
+    invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, related_name="items")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="invoice_items")
+    quantity = models.PositiveIntegerField()
+    list_price = models.DecimalField(max_digits=12, decimal_places=2)
+    discount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    tax = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    line_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    def save(self, *args, **kwargs):
+        self.line_total = (self.list_price * self.quantity) - self.discount + self.tax
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.product.name}"
+    
+
+
+class PurchaseOrder(models.Model):
+
+    STATUS_CHOICES = [
+        ("created", "Created"),
+        ("sent", "Sent"),
+        ("confirmed", "Confirmed"),
+        ("partially_received", "Partially Received"),
+        ("received", "Received"),
+        ("cancelled", "Cancelled"),
+    ]
+
+    owner = models.ForeignKey( Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="purchase_orders")
+    subject = models.CharField(max_length=255)
+    purchase_order_number = models.CharField( max_length=50, unique=True, editable=False)
+    vendor = models.ForeignKey( Vendor, on_delete=models.PROTECT, related_name="purchase_orders")
+    billing_address = models.OneToOneField( Address, on_delete=models.CASCADE, null=True, blank=True, related_name="purchase_order_billing")
+    shipping_address = models.OneToOneField( Address, on_delete=models.CASCADE, null=True, blank=True, related_name="purchase_order_shipping")
+    purchase_date = models.DateField()
+    expected_delivery_date = models.DateField( null=True, blank=True)
+    status = models.CharField( max_length=30, choices=STATUS_CHOICES, default="created")
+    terms_and_conditions = models.TextField( blank=True)
+    description = models.TextField( blank=True)
+    created_at = models.DateTimeField( auto_now_add=True)
+    updated_at = models.DateTimeField( auto_now=True)
+
+    def save(self, *args, **kwargs):
+        if not self.purchase_order_number:
+            last_po = PurchaseOrder.objects.order_by("-id").first()
+
+            if last_po:
+                last_number = int(last_po.purchase_order_number.split("-")[1])
+                next_number = last_number + 1
+            else:
+                next_number = 1
+
+            self.purchase_order_number = f"PO-{next_number:05d}"
+
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.purchase_order_number
+
+    def delete(self, *args, **kwargs):
+        if self.billing_address:
+            self.billing_address.delete()
+
+        if self.shipping_address:
+            self.shipping_address.delete()
+
+        super().delete(*args, **kwargs)
+
+class PurchaseOrderItem(models.Model):
+
+    purchase_order = models.ForeignKey( PurchaseOrder, on_delete=models.CASCADE, related_name="items")
+    product = models.ForeignKey( Product, on_delete=models.PROTECT, related_name="purchase_order_items")
+    quantity = models.PositiveIntegerField()
+    list_price = models.DecimalField( max_digits=12, decimal_places=2)
+    discount = models.DecimalField( max_digits=12, decimal_places=2, default=0)
+    tax = models.DecimalField( max_digits=12, decimal_places=2, default=0)
+    line_total = models.DecimalField( max_digits=12, decimal_places=2, default=0)
+    description = models.TextField( blank=True)
+
+    def save(self, *args, **kwargs):
+        self.line_total = (
+            (self.list_price * self.quantity)
+            - self.discount
+            + self.tax
+        )
+
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.purchase_order.purchase_order_number} - {self.product.name}"

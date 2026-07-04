@@ -103,4 +103,17 @@ urlpatterns= [
     path('salesorder/delete/<int:id>/', views.delete_sales_order, name='sales-order-delete'),
     path('salesorder/quote-prefill/<int:quote_id>/', views.get_quote_prefill, name='sales-order-quote-prefill'),
 
+    path('invoice/add/', views.add_invoice, name='invoice-add'),
+    path('invoice/view/', views.view_invoices, name='invoice-view'),
+    path('invoice/single/view/<int:id>/', views.view_single_invoice, name='invoice-single'),
+    path('invoice/update/<int:id>/', views.update_invoice, name='invoice-update'),
+    path('invoice/delete/<int:id>/', views.delete_invoice, name='invoice-delete'),
+    path('invoice/sales-order-prefill/<int:sales_order_id>/', views.get_sales_order_prefill, name='invoice-sales-order-prefill'),
+
+    path('purchaseorder/add/', views.add_purchase_order, name='purchase-order-add'),
+    path('purchaseorder/view/', views.view_purchase_orders, name='purchase-order-view'),
+    path('purchaseorder/single/view/<int:id>/', views.view_single_purchase_order, name='purchase-order-single'),
+    path('purchaseorder/update/<int:id>/', views.update_purchase_order, name='purchase-order-update'),
+    path('purchaseorder/delete/<int:id>/', views.delete_purchase_order, name='purchase-order-delete'),
+
 ]

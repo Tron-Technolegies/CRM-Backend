@@ -7,7 +7,7 @@ from django.db.models.functions import TruncWeek
 from django.db.models import Count
 from django.db import transaction
 
-from AdminApp.models import Accounts, Address, Call, Customer, Deal, Lead, Meeting, PicklistOption, PriceBook, PriceBookItem, Product, QuoteProduct, Quotes, SalesOrder, SalesOrderItem, Staff, Task, Vendor
+from AdminApp.models import Accounts, Address, Call, Customer, Deal, Invoice, InvoiceItem, Lead, Meeting, PicklistOption, PriceBook, PriceBookItem, Product, PurchaseOrder, PurchaseOrderItem, QuoteProduct, Quotes, SalesOrder, SalesOrderItem, Staff, Task, Vendor
 
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
@@ -1740,13 +1740,9 @@ def add_vendor(request):
     mobile = request.data.get("mobile", "")
     website = request.data.get("website", "")
     gst_number = request.data.get("gst_number", "")
-    address = request.data.get("address", "")
-    city = request.data.get("city", "")
-    state = request.data.get("state", "")
-    country = request.data.get("country", "")
-    postal_code = request.data.get("postal_code", "")
     status = request.data.get("status", "active")
     notes = request.data.get("notes", "")
+    address_data = request.data.get("address")
 
     if not vendor_name or not vendor_code:
         return HttpResponse("Vendor name and vendor code are required", status=400)
@@ -1755,6 +1751,8 @@ def add_vendor(request):
         return HttpResponse("Vendor code already exists", status=400)
 
     try:
+        address = _create_address(address_data) if address_data else None
+
         Vendor.objects.create(
             vendor_name=vendor_name,
             vendor_code=vendor_code,
@@ -1764,13 +1762,9 @@ def add_vendor(request):
             mobile=mobile,
             website=website,
             gst_number=gst_number,
-            address=address,
-            city=city,
-            state=state,
-            country=country,
-            postal_code=postal_code,
             status=status,
             notes=notes,
+            address=address,
         )
         return HttpResponse("Vendor created successfully", status=201)
 
@@ -1781,7 +1775,7 @@ def add_vendor(request):
 
 @api_view(['GET'])
 def view_vendors(request):
-    vendors = Vendor.objects.all().order_by("-updated_at")
+    vendors = Vendor.objects.select_related("address").all().order_by("-updated_at")
 
     data = []
     for v in vendors:
@@ -1795,13 +1789,9 @@ def view_vendors(request):
             "mobile": v.mobile,
             "website": v.website,
             "gstNumber": v.gst_number,
-            "address": v.address,
-            "city": v.city,
-            "state": v.state,
-            "country": v.country,
-            "postalCode": v.postal_code,
             "status": v.status,
             "notes": v.notes,
+            "address": _format_address(v.address),
             "createdAt": v.created_at.isoformat(),
             "updatedAt": v.updated_at.isoformat(),
         })
@@ -1811,7 +1801,7 @@ def view_vendors(request):
 
 @api_view(['GET'])
 def view_single_vendor(request, id):
-    vendor = get_object_or_404(Vendor, id=id)
+    vendor = get_object_or_404(Vendor.objects.select_related("address"), id=id)
 
     data = {
         "id": vendor.id,
@@ -1823,13 +1813,9 @@ def view_single_vendor(request, id):
         "mobile": vendor.mobile,
         "website": vendor.website,
         "gstNumber": vendor.gst_number,
-        "address": vendor.address,
-        "city": vendor.city,
-        "state": vendor.state,
-        "country": vendor.country,
-        "postalCode": vendor.postal_code,
         "status": vendor.status,
         "notes": vendor.notes,
+        "address": _format_address(vendor.address),
         "createdAt": vendor.created_at.isoformat(),
         "updatedAt": vendor.updated_at.isoformat(),
     }
@@ -1840,7 +1826,7 @@ def view_single_vendor(request, id):
 @api_view(['PUT'])
 def update_vendor(request, id):
     try:
-        vendor = Vendor.objects.get(id=id)
+        vendor = Vendor.objects.select_related("address").get(id=id)
     except Vendor.DoesNotExist:
         return HttpResponse("Vendor not found", status=404)
 
@@ -1852,20 +1838,29 @@ def update_vendor(request, id):
         vendor.mobile = request.data.get("mobile", vendor.mobile)
         vendor.website = request.data.get("website", vendor.website)
         vendor.gst_number = request.data.get("gst_number", vendor.gst_number)
-        vendor.address = request.data.get("address", vendor.address)
-        vendor.city = request.data.get("city", vendor.city)
-        vendor.state = request.data.get("state", vendor.state)
-        vendor.country = request.data.get("country", vendor.country)
-        vendor.postal_code = request.data.get("postal_code", vendor.postal_code)
         vendor.status = request.data.get("status", vendor.status)
         vendor.notes = request.data.get("notes", vendor.notes)
 
-        # vendor_code is unique — only update if provided and different
+        # vendor_code — only update if different
         new_code = request.data.get("vendor_code")
         if new_code and new_code != vendor.vendor_code:
             if Vendor.objects.filter(vendor_code=new_code).exists():
                 return HttpResponse("Vendor code already exists", status=400)
             vendor.vendor_code = new_code
+
+        # Update address
+        address_data = request.data.get("address")
+        if address_data:
+            if vendor.address:
+                vendor.address.country = address_data.get("country", vendor.address.country)
+                vendor.address.address = address_data.get("address", vendor.address.address)
+                vendor.address.street_address = address_data.get("street_add", vendor.address.street_address)
+                vendor.address.city = address_data.get("city", vendor.address.city)
+                vendor.address.state = address_data.get("state", vendor.address.state)
+                vendor.address.zip_code = address_data.get("zip_code", vendor.address.zip_code)
+                vendor.address.save()
+            else:
+                vendor.address = _create_address(address_data)
 
         vendor.save()
         return HttpResponse("Vendor updated successfully", status=200)
@@ -2641,3 +2636,542 @@ def delete_sales_order(request, id):
         return JsonResponse({"message": "Sales order deleted successfully"})
     except SalesOrder.DoesNotExist:
         return HttpResponse("Sales order not found", status=404)
+    
+
+
+# ............... invioce .................
+@api_view(['GET'])
+def get_sales_order_prefill(request, sales_order_id):
+    """Fetch sales order data to prefill invoice form"""
+    order = get_object_or_404(
+        SalesOrder.objects.select_related(
+            "owner", "customer", "quote", "deal",
+            "billing_address", "shipping_address"
+        ).prefetch_related("items__product"),
+        id=sales_order_id
+    )
+
+    return JsonResponse({
+        "subject": order.subject,
+        "customerId": order.customer.id,
+        "customerName": order.customer.company_name,
+        "dealId": order.deal.id if order.deal else None,
+        "purchaseOrderNumber": order.purchase_order_number,
+        "billingAddress": _format_address(order.billing_address),
+        "shippingAddress": _format_address(order.shipping_address),
+        "termsAndConditions": order.terms_and_conditions,
+        "items": [
+            {
+                "productId": item.product.id,
+                "productName": item.product.name,
+                "quantity": item.quantity,
+                "listPrice": float(item.list_price),
+                "discount": float(item.discount),
+                "tax": float(item.tax),
+                "lineTotal": float(item.line_total),
+                "description": item.description,
+            }
+            for item in order.items.all()
+        ],
+    })
+
+
+@api_view(['POST'])
+def add_invoice(request):
+    subject = request.data.get("subject")
+    customer_id = request.data.get("customer_id")
+    owner_id = request.data.get("owner_id")
+    sales_order_id = request.data.get("sales_order_id")
+    invoice_date = request.data.get("invoice_date")
+    due_date = request.data.get("due_date")
+    purchase_order_number = request.data.get("purchase_order_number", "")
+    status = request.data.get("status", "draft")
+    terms_and_conditions = request.data.get("terms_and_conditions", "")
+    description = request.data.get("description", "")
+    billing_data = request.data.get("billing_add")
+    shipping_data = request.data.get("shipping_add")
+    items_data = request.data.get("items", [])
+
+    if not subject or not customer_id or not invoice_date:
+        return HttpResponse("Subject, customer and invoice_date are required", status=400)
+
+    try:
+        # Auto-fill from sales order if linked and no address provided
+        billing_address = None
+        shipping_address = None
+
+        if sales_order_id and not billing_data and not shipping_data:
+            try:
+                sales_order = SalesOrder.objects.select_related(
+                    "billing_address", "shipping_address"
+                ).prefetch_related("items__product").get(id=sales_order_id)
+
+                if sales_order.billing_address:
+                    billing_address = Address.objects.create(
+                        country=sales_order.billing_address.country,
+                        address=sales_order.billing_address.address,
+                        street_address=sales_order.billing_address.street_address,
+                        city=sales_order.billing_address.city,
+                        state=sales_order.billing_address.state,
+                        zip_code=sales_order.billing_address.zip_code,
+                    )
+
+                if sales_order.shipping_address:
+                    shipping_address = Address.objects.create(
+                        country=sales_order.shipping_address.country,
+                        address=sales_order.shipping_address.address,
+                        street_address=sales_order.shipping_address.street_address,
+                        city=sales_order.shipping_address.city,
+                        state=sales_order.shipping_address.state,
+                        zip_code=sales_order.shipping_address.zip_code,
+                    )
+
+                # Auto-fill items from sales order if none provided
+                if not items_data:
+                    items_data = [
+                        {
+                            "product_id": item.product.id,
+                            "quantity": item.quantity,
+                            "list_price": float(item.list_price),
+                            "discount": float(item.discount),
+                            "tax": float(item.tax),
+                            "description": item.description,
+                        }
+                        for item in sales_order.items.all()
+                    ]
+
+            except SalesOrder.DoesNotExist:
+                pass
+        else:
+            billing_address = _create_address(billing_data)
+            shipping_address = _create_address(shipping_data)
+
+        invoice = Invoice.objects.create(
+            subject=subject,
+            customer_id=customer_id,
+            owner_id=owner_id or None,
+            sales_order_id=sales_order_id or None,
+            invoice_date=invoice_date,
+            due_date=due_date or None,
+            purchase_order_number=purchase_order_number,
+            status=status,
+            billing_address=billing_address,
+            shipping_address=shipping_address,
+            terms_and_conditions=terms_and_conditions,
+            description=description,
+        )
+
+        for item in items_data:
+            InvoiceItem.objects.create(
+                invoice=invoice,
+                product_id=item.get("product_id"),
+                quantity=int(item.get("quantity", 1)),
+                list_price=float(item.get("list_price", 0)),
+                discount=float(item.get("discount", 0)),
+                tax=float(item.get("tax", 0)),
+            )
+
+        return HttpResponse("Invoice created successfully", status=201)
+
+    except Exception as e:
+        print("ADD INVOICE ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['GET'])
+def view_invoices(request):
+    invoices = Invoice.objects.select_related(
+        "owner", "customer", "sales_order",
+        "billing_address", "shipping_address"
+    ).prefetch_related("items__product").all().order_by("-updated_at")
+
+    data = []
+    for inv in invoices:
+        data.append({
+            "id": inv.id,
+            "subject": inv.subject,
+            "invoiceNumber": inv.invoice_number,
+            "status": inv.status,
+            "invoiceDate": str(inv.invoice_date),
+            "dueDate": str(inv.due_date) if inv.due_date else None,
+            "owner": inv.owner.full_name if inv.owner else "—",
+            "ownerId": inv.owner.id if inv.owner else None,
+            "customer": inv.customer.company_name,
+            "customerId": inv.customer.id,
+            "salesOrder": inv.sales_order.subject if inv.sales_order else "—",
+            "salesOrderId": inv.sales_order.id if inv.sales_order else None,
+            "purchaseOrderNumber": inv.purchase_order_number,
+            "billingAddress": _format_address(inv.billing_address),
+            "shippingAddress": _format_address(inv.shipping_address),
+            "termsAndConditions": inv.terms_and_conditions,
+            "description": inv.description,
+            "items": [
+                {
+                    "id": item.id,
+                    "productId": item.product.id,
+                    "productName": item.product.name,
+                    "quantity": item.quantity,
+                    "listPrice": float(item.list_price),
+                    "discount": float(item.discount),
+                    "tax": float(item.tax),
+                    "lineTotal": float(item.line_total),
+                }
+                for item in inv.items.all()
+            ],
+            "createdAt": inv.created_at.isoformat(),
+            "updatedAt": inv.updated_at.isoformat(),
+        })
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['GET'])
+def view_single_invoice(request, id):
+    invoice = get_object_or_404(
+        Invoice.objects.select_related(
+            "owner", "customer", "sales_order",
+            "billing_address", "shipping_address"
+        ).prefetch_related("items__product"),
+        id=id
+    )
+
+    data = {
+        "id": invoice.id,
+        "subject": invoice.subject,
+        "invoiceNumber": invoice.invoice_number,
+        "status": invoice.status,
+        "invoiceDate": str(invoice.invoice_date),
+        "dueDate": str(invoice.due_date) if invoice.due_date else None,
+        "owner": invoice.owner.full_name if invoice.owner else "—",
+        "ownerId": invoice.owner.id if invoice.owner else None,
+        "customer": invoice.customer.company_name,
+        "customerId": invoice.customer.id,
+        "salesOrder": invoice.sales_order.subject if invoice.sales_order else "—",
+        "salesOrderId": invoice.sales_order.id if invoice.sales_order else None,
+        "purchaseOrderNumber": invoice.purchase_order_number,
+        "billingAddress": _format_address(invoice.billing_address),
+        "shippingAddress": _format_address(invoice.shipping_address),
+        "termsAndConditions": invoice.terms_and_conditions,
+        "description": invoice.description,
+        "items": [
+            {
+                "id": item.id,
+                "productId": item.product.id,
+                "productName": item.product.name,
+                "quantity": item.quantity,
+                "listPrice": float(item.list_price),
+                "discount": float(item.discount),
+                "tax": float(item.tax),
+                "lineTotal": float(item.line_total),
+            }
+            for item in invoice.items.all()
+        ],
+        "createdAt": invoice.created_at.isoformat(),
+        "updatedAt": invoice.updated_at.isoformat(),
+    }
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['PUT'])
+def update_invoice(request, id):
+    try:
+        invoice = Invoice.objects.get(id=id)
+    except Invoice.DoesNotExist:
+        return HttpResponse("Invoice not found", status=404)
+
+    try:
+        invoice.subject = request.data.get("subject") or invoice.subject
+        invoice.status = request.data.get("status", invoice.status)
+        invoice.purchase_order_number = request.data.get("purchase_order_number", invoice.purchase_order_number)
+        invoice.terms_and_conditions = request.data.get("terms_and_conditions", invoice.terms_and_conditions)
+        invoice.description = request.data.get("description", invoice.description)
+
+        invoice_date = request.data.get("invoice_date")
+        if invoice_date:
+            invoice.invoice_date = invoice_date
+
+        due_date = request.data.get("due_date")
+        if due_date:
+            invoice.due_date = due_date
+
+        owner_id = request.data.get("owner_id")
+        if owner_id:
+            invoice.owner_id = owner_id
+
+        customer_id = request.data.get("customer_id")
+        if customer_id:
+            invoice.customer_id = customer_id
+
+        sales_order_id = request.data.get("sales_order_id")
+        if sales_order_id:
+            invoice.sales_order_id = sales_order_id
+
+        billing_data = request.data.get("billing_add")
+        invoice.billing_address = _update_address(invoice.billing_address, billing_data)
+
+        shipping_data = request.data.get("shipping_add")
+        invoice.shipping_address = _update_address(invoice.shipping_address, shipping_data)
+
+        invoice.save()
+
+        items_data = request.data.get("items")
+        if items_data is not None:
+            invoice.items.all().delete()
+            for item in items_data:
+                InvoiceItem.objects.create(
+                    invoice=invoice,
+                    product_id=item.get("product_id"),
+                    quantity=int(item.get("quantity", 1)),
+                    list_price=float(item.get("list_price", 0)),
+                    discount=float(item.get("discount", 0)),
+                    tax=float(item.get("tax", 0)),
+                )
+
+        return HttpResponse("Invoice updated successfully", status=200)
+
+    except Exception as e:
+        print("UPDATE INVOICE ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['DELETE'])
+def delete_invoice(request, id):
+    try:
+        invoice = Invoice.objects.get(id=id)
+        invoice.delete()
+        return JsonResponse({"message": "Invoice deleted successfully"})
+    except Invoice.DoesNotExist:
+        return HttpResponse("Invoice not found", status=404)
+    
+
+
+# .............. purchase order ...............
+@api_view(['POST'])
+def add_purchase_order(request):
+    subject = request.data.get("subject")
+    vendor_id = request.data.get("vendor_id")
+    owner_id = request.data.get("owner_id")
+    purchase_date = request.data.get("purchase_date")
+    expected_delivery_date = request.data.get("expected_delivery_date")
+    status = request.data.get("status", "created")
+    terms_and_conditions = request.data.get("terms_and_conditions", "")
+    description = request.data.get("description", "")
+    billing_data = request.data.get("billing_add")
+    shipping_data = request.data.get("shipping_add")
+    items_data = request.data.get("items", [])
+
+    if not subject or not vendor_id or not purchase_date:
+        return HttpResponse("Subject, vendor and purchase_date are required", status=400)
+
+    try:
+        # Auto-fill address from vendor if not provided
+        billing_address = None
+        shipping_address = None
+
+        if not billing_data:
+            try:
+                vendor = Vendor.objects.select_related("address").get(id=vendor_id)
+                if vendor.address:
+                    billing_address = Address.objects.create(
+                        country=vendor.address.country,
+                        address=vendor.address.address,
+                        street_address=vendor.address.street_address,
+                        city=vendor.address.city,
+                        state=vendor.address.state,
+                        zip_code=vendor.address.zip_code,
+                    )
+            except Vendor.DoesNotExist:
+                pass
+        else:
+            billing_address = _create_address(billing_data)
+
+        if shipping_data:
+            shipping_address = _create_address(shipping_data)
+
+        purchase_order = PurchaseOrder.objects.create(
+            subject=subject,
+            vendor_id=vendor_id,
+            owner_id=owner_id or None,
+            purchase_date=purchase_date,
+            expected_delivery_date=expected_delivery_date or None,
+            status=status,
+            billing_address=billing_address,
+            shipping_address=shipping_address,
+            terms_and_conditions=terms_and_conditions,
+            description=description,
+        )
+
+        for item in items_data:
+            PurchaseOrderItem.objects.create(
+                purchase_order=purchase_order,
+                product_id=item.get("product_id"),
+                quantity=int(item.get("quantity", 1)),
+                list_price=float(item.get("list_price", 0)),
+                discount=float(item.get("discount", 0)),
+                tax=float(item.get("tax", 0)),
+                description=item.get("description", ""),
+            )
+
+        return HttpResponse("Purchase order created successfully", status=201)
+
+    except Exception as e:
+        print("ADD PURCHASE ORDER ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['GET'])
+def view_purchase_orders(request):
+    orders = PurchaseOrder.objects.select_related(
+        "owner", "vendor", "billing_address", "shipping_address"
+    ).prefetch_related("items__product").all().order_by("-updated_at")
+
+    data = []
+    for o in orders:
+        data.append({
+            "id": o.id,
+            "subject": o.subject,
+            "purchaseOrderNumber": o.purchase_order_number,
+            "status": o.status,
+            "purchaseDate": str(o.purchase_date),
+            "expectedDeliveryDate": str(o.expected_delivery_date) if o.expected_delivery_date else None,
+            "owner": o.owner.full_name if o.owner else "—",
+            "ownerId": o.owner.id if o.owner else None,
+            "vendor": o.vendor.vendor_name,
+            "vendorId": o.vendor.id,
+            "billingAddress": _format_address(o.billing_address),
+            "shippingAddress": _format_address(o.shipping_address),
+            "termsAndConditions": o.terms_and_conditions,
+            "description": o.description,
+            "items": [
+                {
+                    "id": item.id,
+                    "productId": item.product.id,
+                    "productName": item.product.name,
+                    "quantity": item.quantity,
+                    "listPrice": float(item.list_price),
+                    "discount": float(item.discount),
+                    "tax": float(item.tax),
+                    "lineTotal": float(item.line_total),
+                    "description": item.description,
+                }
+                for item in o.items.all()
+            ],
+            "createdAt": o.created_at.isoformat(),
+            "updatedAt": o.updated_at.isoformat(),
+        })
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['GET'])
+def view_single_purchase_order(request, id):
+    order = get_object_or_404(
+        PurchaseOrder.objects.select_related(
+            "owner", "vendor", "billing_address", "shipping_address"
+        ).prefetch_related("items__product"),
+        id=id
+    )
+
+    data = {
+        "id": order.id,
+        "subject": order.subject,
+        "purchaseOrderNumber": order.purchase_order_number,
+        "status": order.status,
+        "purchaseDate": str(order.purchase_date),
+        "expectedDeliveryDate": str(order.expected_delivery_date) if order.expected_delivery_date else None,
+        "owner": order.owner.full_name if order.owner else "—",
+        "ownerId": order.owner.id if order.owner else None,
+        "vendor": order.vendor.vendor_name,
+        "vendorId": order.vendor.id,
+        "billingAddress": _format_address(order.billing_address),
+        "shippingAddress": _format_address(order.shipping_address),
+        "termsAndConditions": order.terms_and_conditions,
+        "description": order.description,
+        "items": [
+            {
+                "id": item.id,
+                "productId": item.product.id,
+                "productName": item.product.name,
+                "quantity": item.quantity,
+                "listPrice": float(item.list_price),
+                "discount": float(item.discount),
+                "tax": float(item.tax),
+                "lineTotal": float(item.line_total),
+                "description": item.description,
+            }
+            for item in order.items.all()
+        ],
+        "createdAt": order.created_at.isoformat(),
+        "updatedAt": order.updated_at.isoformat(),
+    }
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['PUT'])
+def update_purchase_order(request, id):
+    try:
+        order = PurchaseOrder.objects.get(id=id)
+    except PurchaseOrder.DoesNotExist:
+        return HttpResponse("Purchase order not found", status=404)
+
+    try:
+        order.subject = request.data.get("subject") or order.subject
+        order.status = request.data.get("status", order.status)
+        order.terms_and_conditions = request.data.get("terms_and_conditions", order.terms_and_conditions)
+        order.description = request.data.get("description", order.description)
+
+        purchase_date = request.data.get("purchase_date")
+        if purchase_date:
+            order.purchase_date = purchase_date
+
+        expected_delivery_date = request.data.get("expected_delivery_date")
+        if expected_delivery_date:
+            order.expected_delivery_date = expected_delivery_date
+
+        owner_id = request.data.get("owner_id")
+        if owner_id:
+            order.owner_id = owner_id
+
+        vendor_id = request.data.get("vendor_id")
+        if vendor_id:
+            order.vendor_id = vendor_id
+
+        billing_data = request.data.get("billing_add")
+        order.billing_address = _update_address(order.billing_address, billing_data)
+
+        shipping_data = request.data.get("shipping_add")
+        order.shipping_address = _update_address(order.shipping_address, shipping_data)
+
+        order.save()
+
+        items_data = request.data.get("items")
+        if items_data is not None:
+            order.items.all().delete()
+            for item in items_data:
+                PurchaseOrderItem.objects.create(
+                    purchase_order=order,
+                    product_id=item.get("product_id"),
+                    quantity=int(item.get("quantity", 1)),
+                    list_price=float(item.get("list_price", 0)),
+                    discount=float(item.get("discount", 0)),
+                    tax=float(item.get("tax", 0)),
+                    description=item.get("description", ""),
+                )
+
+        return HttpResponse("Purchase order updated successfully", status=200)
+
+    except Exception as e:
+        print("UPDATE PURCHASE ORDER ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['DELETE'])
+def delete_purchase_order(request, id):
+    try:
+        order = PurchaseOrder.objects.get(id=id)
+        order.delete()
+        return JsonResponse({"message": "Purchase order deleted successfully"})
+    except PurchaseOrder.DoesNotExist:
+        return HttpResponse("Purchase order not found", status=404)
