@@ -2,6 +2,18 @@ from django.db import models
 from django.contrib.auth.models import User
 
 
+class Company(models.Model):
+    name = models.CharField(max_length=255)
+    email = models.EmailField(unique=True)
+    phone = models.CharField(max_length=20, blank=True)
+    website = models.URLField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.name
+
+
 class Staff(models.Model):
     ROLE_CHOICES = [
         ("admin", "Admin"),
@@ -9,6 +21,8 @@ class Staff(models.Model):
         ("sales agent", "Sales agent"),
         ("support agent", "Support agent"),
     ]
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="staff")
 
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="staff", null=True, blank=True,)
 
@@ -30,6 +44,9 @@ class Customer(models.Model):
         ("active", "Active"),
         ("inactive", "Inactive"),
     ]
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="customers")
+
     company_name = models.CharField(max_length=255)
     contact_name = models.CharField(max_length=255)
     phone_number = models.CharField(max_length=20)
@@ -68,6 +85,8 @@ class Lead(models.Model):
         ("converted", "Converted"),
         ("lost", "Lost"),
     ]
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="leads")
 
     full_name = models.CharField(max_length=255)
     phone_number = models.CharField(max_length=20)
@@ -115,6 +134,8 @@ class Deal(models.Model):
         ("High", "High"),
     ]
 
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="deals")
+
     deal_name = models.CharField(max_length=255)
     company_name = models.CharField(max_length=255)
     deal_amount = models.DecimalField( max_digits=12, decimal_places=2, default=0 )
@@ -151,6 +172,8 @@ class Task(models.Model):
         ("completed", "Completed"),
     ]
 
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="tasks")
+
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True, null=True)
     assigned_to = models.ForeignKey( Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="tasks")
@@ -181,6 +204,8 @@ class PicklistOption(models.Model):
         ("task_priority", "Task Priority"),
     ]
 
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="picklist_options")
+
     field = models.CharField(max_length=50, choices=FIELD_CHOICES)
     value = models.CharField(max_length=50)   # internal value, e.g. "new"
     label = models.CharField(max_length=50)   # display label, e.g. "New"
@@ -210,6 +235,9 @@ class Address(models.Model):
 
 
 class Accounts(models.Model):
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="accounts")
+
     account_name = models.CharField(max_length=255)
     assigned_to = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="accounts")
     phone_number = models.CharField(max_length=20, blank=True)
@@ -247,6 +275,8 @@ class Product(models.Model):
         ("active", "Active"),
         ("inactive", "Inactive"),
     ]
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="products")
 
     name = models.CharField(max_length=255)
     product_code = models.CharField(max_length=50, unique=True)
@@ -287,6 +317,8 @@ class Quotes(models.Model):
         ('closed_won', 'Closed Won'),
         ('closed_lost', 'Closed Lost'),
     ]
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="quotes")
     
     subject = models.CharField(max_length=255)
     quote_stage = models.CharField(max_length=50, choices=QUOTE_STAGE_CHOICES, default='draft')
@@ -359,6 +391,8 @@ class Meeting(models.Model):
         ("monthly", "Monthly"),
     ]
 
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="meetings")
+
     title = models.CharField(max_length=255)
     meeting_venue = models.CharField(max_length=50, choices=VENUE_CHOICES, default="online")
 
@@ -400,6 +434,8 @@ class Call(models.Model):
         ("cancelled", "Cancelled"),
     ]
 
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="calls")
+
     subject = models.CharField(max_length=200)
     call_type = models.CharField(max_length=20, choices=CALL_TYPE)
     status = models.CharField(max_length=20, choices=STATUS, default="scheduled")
@@ -426,6 +462,8 @@ class Vendor(models.Model):
         ("active", "Active"),
         ("inactive", "Inactive"),
     ]
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="vendors")
 
     vendor_name = models.CharField(max_length=255)
     vendor_code = models.CharField(max_length=50, unique=True)
@@ -463,7 +501,8 @@ class PriceBook(models.Model):
         ("inactive", "Inactive"),
     ]
 
-    name = models.CharField(max_length=100, unique=True)
+    company = models.ForeignKey( Company, on_delete=models.CASCADE, null=True, blank=True,)
+    name = models.CharField(max_length=100)
     description = models.TextField(blank=True, null=True)
     status = models.CharField( max_length=20, choices=STATUS_CHOICES, default="active")
 
@@ -494,6 +533,8 @@ class SalesOrder(models.Model):
         ("delivered", "Delivered"),
         ("cancelled", "Cancelled"),
     ]
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="sales_orders")
 
     owner = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="sales_orders")
     subject = models.CharField(max_length=255)
@@ -552,6 +593,8 @@ class Invoice(models.Model):
         ("overdue", "Overdue"),
         ("cancelled", "Cancelled"),
     ]
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="invoices")
 
     owner = models.ForeignKey( Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="invoices")
     subject = models.CharField(max_length=255)
@@ -618,6 +661,8 @@ class PurchaseOrder(models.Model):
         ("received", "Received"),
         ("cancelled", "Cancelled"),
     ]
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="purchase_orders")
 
     owner = models.ForeignKey( Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="purchase_orders")
     subject = models.CharField(max_length=255)

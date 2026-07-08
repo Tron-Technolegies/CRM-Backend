@@ -1,13 +1,13 @@
 from django.utils import timezone
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, render
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes
 from django.db.models import Sum
 from django.db.models.functions import TruncWeek
 from django.db.models import Count
 from django.db import transaction
 
-from AdminApp.models import Accounts, Address, Call, Customer, Deal, Invoice, InvoiceItem, Lead, Meeting, PicklistOption, PriceBook, PriceBookItem, Product, PurchaseOrder, PurchaseOrderItem, QuoteProduct, Quotes, SalesOrder, SalesOrderItem, Staff, Task, Vendor
+from AdminApp.models import Accounts, Address, Call, Company, Customer, Deal, Invoice, InvoiceItem, Lead, Meeting, PicklistOption, PriceBook, PriceBookItem, Product, PurchaseOrder, PurchaseOrderItem, QuoteProduct, Quotes, SalesOrder, SalesOrderItem, Staff, Task, Vendor
 
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
@@ -16,21 +16,62 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.views.decorators.csrf import csrf_exempt
-
+from rest_framework.permissions import AllowAny
 
 
 # .............. authentication..............
-@api_view(['POST'])
+@api_view(["POST"])
+@permission_classes([AllowAny])
+@transaction.atomic
 def user_signup(request):
-    name = request.data.get("name")
-    email = request.data.get("email")
-    password = request.data.get("password")
 
-    if not email or not password or not name:
-        return Response({"message": "Name, email and password are required"}, status=400)
+
+    name = request.data.get("name", "").strip()
+    email = request.data.get("email", "").strip().lower()
+    password = request.data.get("password", "")
+
+    company_name = request.data.get("company_name", "").strip()
+    company_email = request.data.get("company_email", "").strip().lower()
+    company_phone = request.data.get("company_phone", "").strip()
+    company_website = request.data.get("company_website", "").strip()
+
+    if not name:
+        return Response({"message": "Name is required"}, status=400)
+
+    if not email:
+        return Response({"message": "Email is required"}, status=400)
+
+    if not password:
+        return Response({"message": "Password is required"}, status=400)
+
+    if not company_name:
+        return Response({"message": "Company name is required"}, status=400)
+
+    if not company_email:
+        return Response({"message": "Company email is required"}, status=400)
+
 
     if User.objects.filter(email=email).exists():
-        return Response({"message": "Email already exists"}, status=400)
+        return Response(
+            {"message": "User email already exists"},
+            status=400
+        )
+
+
+    if Company.objects.filter(email=company_email).exists():
+        return Response(
+            {"message": "Company email already exists"},
+            status=400
+        )
+
+
+    company = Company.objects.create(
+        name=company_name,
+        email=company_email,
+        phone=company_phone,
+        website=company_website,
+    )
+
 
     user = User.objects.create_user(
         username=email,
@@ -39,61 +80,130 @@ def user_signup(request):
         first_name=name,
     )
 
-    # Create Staff with no role/department — super admin assigns later
-    Staff.objects.create(
+
+    staff = Staff.objects.create(
+        company=company,
         user=user,
         full_name=name,
         email=email,
-        role="",
-        department="",
+        role="admin",
+        department="Management",
         is_invited=False,
+        is_accepted=True,
     )
 
-    return Response({"message": "Account created successfully"})
+    refresh = RefreshToken.for_user(user)
+
+    return Response({
+
+        "message": "Company created successfully",
+
+        "access": str(refresh.access_token),
+        "refresh": str(refresh),
+
+        "user": {
+
+            "id": user.id,
+            "name": user.first_name,
+            "email": user.email,
+
+            "role": staff.role,
+
+            "companyId": company.id,
+            "companyName": company.name,
+
+        }
+
+    })
 
 
 
-@api_view(['POST'])
+@api_view(["POST"])
+@permission_classes([AllowAny])
 def user_login(request):
-    email = request.data.get("email")
-    password = request.data.get("password")
 
-    if not email or not password:
-        return Response({"message": "Email and password are required"}, status=400)
+    email = request.data.get("email", "").strip().lower()
+    password = request.data.get("password", "")
+
+    if not email:
+        return Response(
+            {"message": "Email is required"},
+            status=400
+        )
+
+    if not password:
+        return Response(
+            {"message": "Password is required"},
+            status=400
+        )
 
     try:
         user_obj = User.objects.get(email=email)
-    except User.DoesNotExist:
-        return Response({"message": "Invalid credentials"}, status=401)
 
-    user = authenticate(username=user_obj.username, password=password)
+    except User.DoesNotExist:
+
+        return Response(
+            {"message": "Invalid email or password"},
+            status=401
+        )
+
+    user = authenticate(
+        username=user_obj.username,
+        password=password
+    )
 
     if user is None:
-        return Response({"message": "Invalid credentials"}, status=401)
 
-    # Get linked staff via OneToOne relation
+        return Response(
+            {"message": "Invalid email or password"},
+            status=401
+        )
+
     try:
-        staff = user.staff
-        staff_data = {
-            "id": staff.id,
-            "fullName": staff.full_name,
-            "role": staff.role,
-            "department": staff.department,
-        }
+
+        staff = Staff.objects.select_related("company").get(user=user)
+
     except Staff.DoesNotExist:
-        staff_data = None
+
+        return Response(
+            {"message": "Staff profile not found"},
+            status=404
+        )
+
+    if not staff.company.is_active:
+
+        return Response(
+            {"message": "Your company has been deactivated."},
+            status=403
+        )
+
+    if not staff.is_accepted:
+
+        return Response(
+            {"message": "Your account is not activated."},
+            status=403
+        )
 
     refresh = RefreshToken.for_user(user)
 
     return JsonResponse({
+
         "access": str(refresh.access_token),
         "refresh": str(refresh),
+
         "user": {
+
             "id": user.id,
-            "email": user.email,
             "name": user.first_name,
-            "staff": staff_data,
+            "email": user.email,
+
+            "role": staff.role,
+
+            "companyId": staff.company.id,
+            "companyName": staff.company.name,
+
         }
+
     })
 
 
@@ -130,6 +240,7 @@ def add_lead(request):
 
     try:
         Lead.objects.create(
+            company=request.company,
             full_name=full_name,
             phone_number=phone_number,
             email=email,
@@ -152,7 +263,7 @@ def add_lead(request):
 
 @api_view(['GET'])
 def view_leads(request):
-    leads = Lead.objects.all().order_by('-updated_at')
+    leads = Lead.objects.filter(company=request.company).order_by('-updated_at')
     list = []
 
     for i in leads:
@@ -179,7 +290,7 @@ def view_leads(request):
 
 @api_view(['GET'])
 def view_single_lead(request, id):
-    lead = get_object_or_404(Lead, id=id)
+    lead = get_object_or_404(Lead, id=id, company=request.company)
     
     data = {
                 "id": lead.id,
@@ -205,7 +316,7 @@ def view_single_lead(request, id):
 def update_lead(request, id):
     print("UPDATE DATA:", request.data)
     try:
-        lead = Lead.objects.get(id=id)
+        lead = Lead.objects.get(id=id, company=request.company)
     except Lead.DoesNotExist:
         return HttpResponse("Lead not found", status=404)
 
@@ -239,7 +350,7 @@ def update_lead(request, id):
 
 @api_view(['DELETE'])
 def delete_lead(request, id):
-    data = Lead.objects.get(id=id)
+    data = Lead.objects.get(id=id, company=request.company)
     data.delete()
     return JsonResponse({"message": "successfully deleted"})
 
@@ -275,6 +386,7 @@ def add_deal(request):
 
     try:
         Deal.objects.create(
+            company=request.company,
             deal_name=deal_name,
             company_name=company_name,
             deal_amount=deal_amount,
@@ -302,7 +414,7 @@ def add_deal(request):
 
 @api_view(['GET'])
 def view_deals(request):
-    deals = Deal.objects.all().order_by('-updated_at')
+    deals = Deal.objects.filter(company=request.company).order_by('-updated_at')
     list = []
 
     for i in deals:
@@ -326,7 +438,7 @@ def view_deals(request):
 
 @api_view(['GET'])
 def view_single_deals(request, id):
-    deal = get_object_or_404(Deal, id=id)
+    deal = get_object_or_404(Deal, id=id, company=request.company)
 
     data = {
                 "id": deal.id,
@@ -349,7 +461,7 @@ def view_single_deals(request, id):
 @api_view(['PUT'])
 def update_deal(request, id):
     try:
-        deal = Deal.objects.get(id=id)
+        deal = Deal.objects.get(id=id, company=request.company)
     except Deal.DoesNotExist:
         return HttpResponse("Dead not found", status=404)
 
@@ -378,7 +490,7 @@ def update_deal(request, id):
 
 @api_view(['DELETE'])
 def delete_deal(request, id):
-    data = Deal.objects.get(id=id)
+    data = Deal.objects.get(id=id, company=request.company)
     data.delete()
     return JsonResponse({"message": "successfully deleted"})
 
@@ -411,6 +523,7 @@ def add_customer(request):
 
     try:
         customer = Customer.objects.create(
+            company=request.company,
             company_name=company_name,
             contact_name=contact_name,
             phone_number=phone_number,
@@ -434,7 +547,7 @@ def add_customer(request):
 
 @api_view(['GET'])
 def view_customers(request):
-    customers = Customer.objects.all().order_by('-updated_at')
+    customers = Customer.objects.filter(company=request.company)
     data = []
 
     for i in customers:
@@ -457,7 +570,7 @@ def view_customers(request):
 
 @api_view(['GET'])
 def view_single_customer(request, id):
-    customer = get_object_or_404(Customer, id=id)
+    customer = get_object_or_404(Customer, id=id, company=request.company)
 
     data = {
                 "id": customer.id,
@@ -478,7 +591,7 @@ def view_single_customer(request, id):
 @api_view(['PUT'])
 def update_customer(request, id):
     try:
-        customer = Customer.objects.get(id=id)
+        customer = Customer.objects.get(id=id, company=request.company)
     except Customer.DoesNotExist:
         return HttpResponse("Customer not found", status=404)
 
@@ -500,7 +613,7 @@ def update_customer(request, id):
 
 @api_view(['DELETE'])
 def delete_customer(request, id):
-    customer = Customer.objects.get(id=id)
+    customer = Customer.objects.get(id=id, company=request.company)
     customer.delete()
     return JsonResponse({"message": "Customer deleted successfully"})
 
@@ -531,6 +644,7 @@ def add_task(request):
 
     try:
         Task.objects.create(
+            company=request.company,
             title=title,
             description=description,
             assigned_to=None,
@@ -548,7 +662,7 @@ def add_task(request):
 
 @api_view(['GET'])
 def view_tasks(request):
-    tasks = Task.objects.all().order_by('-updated_at')
+    tasks = Task.objects.filter(company=request.company)
     data = []
 
     for i in tasks:
@@ -571,7 +685,7 @@ def view_tasks(request):
 
 @api_view(['GET'])
 def view_single_task(request, id):
-    task = get_object_or_404(Task, id=id)
+    task = get_object_or_404(Task, id=id, company=request.company)
 
     data = {
                 "id": task.id,
@@ -593,7 +707,7 @@ def view_single_task(request, id):
 @api_view(['PUT'])
 def update_task(request, id):
     try:
-        task = Task.objects.get(id=id)
+        task = Task.objects.get(id=id, company=request.company)
 
     except Task.DoesNotExist:
         return HttpResponse("Task not found", status=404)
@@ -621,7 +735,7 @@ def update_task(request, id):
 
 @api_view(['DELETE'])
 def delete_task(request, id):
-        task = Task.objects.get(id=id)
+        task = Task.objects.get(id=id, company=request.company)
         task.delete()
         return JsonResponse({"message": "Task deleted successfully"})
 
@@ -643,6 +757,7 @@ def add_staff(request):
 
     try:
         Staff.objects.create(
+            company=request.company,
             full_name=full_name,
             email=email,
             role=role,
@@ -659,7 +774,7 @@ def add_staff(request):
 
 @api_view(['GET'])
 def view_staff(request):
-    staffs = Staff.objects.all().order_by('-invited_at')
+    staffs = Staff.objects.filter(company=request.company)
     data = []
 
     for i in staffs:
@@ -679,7 +794,7 @@ def view_staff(request):
 
 @api_view(['GET'])
 def view_single_staff(request, id):
-    staff = get_object_or_404(Staff, id=id)
+    staff = get_object_or_404(Staff, id=id, company=request.company)
 
     data = {
                 "id": staff.id,
@@ -697,7 +812,7 @@ def view_single_staff(request, id):
 @api_view(['PUT'])
 def update_staff(request, id):
     try:
-        staff = Staff.objects.get(id=id)
+        staff = Staff.objects.get(id=id, company=request.company)
     except Staff.DoesNotExist:
         return HttpResponse("Staff not found", status=404)
 
@@ -714,7 +829,7 @@ def update_staff(request, id):
 
 @api_view(['DELETE'])
 def delete_staff(request, id):
-    staff = Staff.objects.get(id=id)
+    staff = Staff.objects.get(id=id, company=request.company)
     staff.delete()
     return JsonResponse({"message": "Staff deleted successfully"})
 
@@ -728,10 +843,10 @@ def report_view(request):
     start_date = request.GET.get("start_date")
     end_date = request.GET.get("end_date")
 
-    leads_qs = Lead.objects.all()
-    deals_qs = Deal.objects.all()
-    customers_qs = Customer.objects.all()
-    tasks_qs = Task.objects.all()
+    leads_qs = Lead.objects.filter(company=request.company)
+    deals_qs = Deal.objects.filter(company=request.company)
+    customers_qs = Customer.objects.filter(company=request.company)
+    tasks_qs = Task.objects.filter(company=request.company)
 
     if start_date and end_date:
         leads_qs = leads_qs.filter(created_at__date__range=[start_date, end_date])
@@ -810,7 +925,7 @@ def report_view(request):
 def convert_lead_to_customer(request, lead_id):
 
     try:
-        lead = Lead.objects.get(id=lead_id)
+        lead = Lead.objects.get(id=lead_id, company=request.company)
     except Lead.DoesNotExist:
         return HttpResponse("Lead not found", status=404)
 
@@ -831,7 +946,7 @@ def convert_lead_to_customer(request, lead_id):
 # ............ unconverted lead show in dropdown ........
 @api_view(['GET'])
 def get_unconverted_leads(request):
-    leads = Lead.objects.exclude(status="converted")
+    leads = Lead.objects.exclude(status="converted", company=request.company)
     data = []
     for lead in leads:
         data.append({
@@ -862,7 +977,7 @@ def get_linkable_deals(request):
 @api_view(['GET'])
 def leads_by_source(request):
     from django.db.models import Count
-    sources = Lead.objects.values('lead_source').annotate(count=Count('id'))
+    sources = Lead.objects.values('lead_source').annotate(count=Count('id'), company=request.company)
     total = Lead.objects.count()
     
     colors = {
@@ -892,7 +1007,7 @@ def leads_by_source(request):
 @api_view(['GET'])
 def view_picklists(request):
     field = request.GET.get("field")
-    qs = PicklistOption.objects.filter(is_active=True)
+    qs = PicklistOption.objects.filter(company=request.company, is_active=True)
     if field:
         qs = qs.filter(field=field)
     data = [{"id": o.id, "field": o.field, "value": o.value, "label": o.label, "order": o.order} for o in qs]
@@ -912,14 +1027,14 @@ def add_picklist_option(request):
         return HttpResponse("This option already exists", status=400)
 
     max_order = PicklistOption.objects.filter(field=field).count()
-    PicklistOption.objects.create(field=field, value=value, label=label, order=max_order)
+    PicklistOption.objects.create(company=request.company, field=field, value=value, label=label, order=max_order)
     return HttpResponse("Option added successfully", status=201)
 
 
 @api_view(['PUT'])
 def update_picklist_option(request, id):
     try:
-        option = PicklistOption.objects.get(id=id)
+        option = PicklistOption.objects.get(id=id, company=request.company)
     except PicklistOption.DoesNotExist:
         return HttpResponse("Option not found", status=404)
 
@@ -1058,7 +1173,7 @@ def view_accounts(request):
 @api_view(['PUT'])
 def update_account(request, id):
     try:
-        account = Accounts.objects.get(id=id)
+        account = Accounts.objects.get(id=id, company=request.company)
     except Accounts.DoesNotExist:
         return HttpResponse("Account not found", status=404)
 
@@ -1135,7 +1250,7 @@ def update_account(request, id):
 
 @api_view(['DELETE'])
 def delete_account(request, id):
-    account = Accounts.objects.get(id=id)
+    account = Accounts.objects.get(id=id, company=request.company)
     account.delete()
     return JsonResponse({"message": "Account deleted successfully"})
 
@@ -1233,6 +1348,7 @@ def add_quote(request):
 
             # 2. Save the primary Quote header record
             quote = Quotes.objects.create(
+                company=request.company,
                 subject=subject,
                 quote_stage=quote_stage,
                 valid_until=valid_until or None,
@@ -1277,10 +1393,11 @@ def add_quote(request):
 
 @api_view(['GET'])
 def view_quotes(request):
-    # Added "items" prefetching to dramatically boost query execution speed
-    quotes = Quotes.objects.prefetch_related("items").select_related(
-        "assigned_to", "deal", "account", "billing_address", "shipping_address"
-    ).all().order_by("-updated_at")
+    quotes = ( Quotes.objects.filter(company=request.company)
+        .prefetch_related("items")
+        .select_related( "assigned_to", "deal", "account", "billing_address", "shipping_address",)
+        .order_by("-updated_at")
+    )
 
     data = []
     for i in quotes:
@@ -1304,10 +1421,8 @@ def view_quotes(request):
 @api_view(['GET'])
 def view_single_quote(request, id):
     quote = get_object_or_404(
-        Quotes.objects.prefetch_related("items").select_related(
-            "assigned_to", "deal", "account", "billing_address", "shipping_address"
-        ),
-        id=id
+        Quotes.objects.select_related("assigned_to", "deal", "account", "billing_address", "shipping_address"),
+        id=id, company=request.company
     )
 
     data = {
@@ -1327,7 +1442,7 @@ def view_single_quote(request, id):
 @api_view(['PUT'])
 def update_quote(request, id):
     try:
-        quote = Quotes.objects.get(id=id)
+        quote = Quotes.objects.get(id=id, company=request.company)
     except Quotes.DoesNotExist:
         return HttpResponse("Quote not found", status=404)
 
@@ -1380,7 +1495,7 @@ def delete_quote(request, id):
     try:
         quote = Quotes.objects.select_related(
             "billing_address", "shipping_address"
-        ).get(id=id)
+        ).get(id=id, company=request.company)
 
         billing = quote.billing_address
         shipping = quote.shipping_address
@@ -1421,6 +1536,7 @@ def add_meeting(request):
 
     try:
         meeting = Meeting.objects.create(
+            company=request.company,
             title=title,
             meeting_venue=meeting_venue,
             provider=provider if meeting_venue == "online" else "",
@@ -1447,9 +1563,12 @@ def add_meeting(request):
 
 @api_view(['GET'])
 def view_meetings(request):
-    meetings = Meeting.objects.select_related(
-        "host", "related_lead", "related_customer"
-    ).prefetch_related("participants").all().order_by("-created_at")
+    meetings = (
+        Meeting.objects.filter(company=request.company)
+        .select_related( "host", "related_lead", "related_customer")
+        .prefetch_related("participants")
+        .order_by("-created_at")
+    )
 
     data = []
     for m in meetings:
@@ -1479,7 +1598,7 @@ def view_meetings(request):
 def view_single_meeting(request, id):
     meeting = get_object_or_404(
         Meeting.objects.select_related("host", "related_lead", "related_customer").prefetch_related("participants"),
-        id=id
+        id=id, company=request.company
     )
 
     data = {
@@ -1507,7 +1626,7 @@ def view_single_meeting(request, id):
 @api_view(['PUT'])
 def update_meeting(request, id):
     try:
-        meeting = Meeting.objects.get(id=id)
+        meeting = Meeting.objects.get(id=id, company=request.company)
     except Meeting.DoesNotExist:
         return HttpResponse("Meeting not found", status=404)
 
@@ -1569,7 +1688,7 @@ def update_meeting(request, id):
 @api_view(['DELETE'])
 def delete_meeting(request, id):
     try:
-        meeting = Meeting.objects.get(id=id)
+        meeting = Meeting.objects.get(id=id, company=request.company)
         meeting.delete()
         return JsonResponse({"message": "Meeting deleted successfully"})
     except Meeting.DoesNotExist:
@@ -1597,6 +1716,7 @@ def add_call(request):
 
     try:
         call = Call.objects.create(
+            company=request.company,
             subject=subject,
             call_type=call_type,
             status=status,
@@ -1618,9 +1738,13 @@ def add_call(request):
 
 @api_view(['GET'])
 def view_calls(request):
-    calls = Call.objects.select_related(
-        "assigned_to", "lead", "contact", "deal"
-    ).all().order_by("-start_time")
+    calls = (
+        Call.objects.filter(company=request.company)
+        .select_related(
+            "assigned_to", "lead", "contact", "deal"
+        )
+        .order_by("-start_time")
+    )
 
     data = []
     for c in calls:
@@ -1648,7 +1772,7 @@ def view_calls(request):
 def view_single_call(request, id):
     call = get_object_or_404(
         Call.objects.select_related("assigned_to", "lead", "contact", "deal"),
-        id=id
+        id=id, company=request.company
     )
 
     data = {
@@ -1674,7 +1798,7 @@ def view_single_call(request, id):
 @api_view(['PUT'])
 def update_call(request, id):
     try:
-        call = Call.objects.get(id=id)
+        call = Call.objects.get(id=id, company=request.company)
     except Call.DoesNotExist:
         return HttpResponse("Call not found", status=404)
 
@@ -1721,7 +1845,7 @@ def update_call(request, id):
 @api_view(['DELETE'])
 def delete_call(request, id):
     try:
-        call = Call.objects.get(id=id)
+        call = Call.objects.get(id=id, company=request.company)
         call.delete()
         return JsonResponse({"message": "Call deleted successfully"})
     except Call.DoesNotExist:
@@ -1754,6 +1878,7 @@ def add_vendor(request):
         address = _create_address(address_data) if address_data else None
 
         Vendor.objects.create(
+            company=request.company,
             vendor_name=vendor_name,
             vendor_code=vendor_code,
             contact_person=contact_person,
@@ -1775,7 +1900,11 @@ def add_vendor(request):
 
 @api_view(['GET'])
 def view_vendors(request):
-    vendors = Vendor.objects.select_related("address").all().order_by("-updated_at")
+    vendors = (
+        Vendor.objects.filter(company=request.company)
+        .select_related("address")
+        .order_by("-updated_at")
+    )
 
     data = []
     for v in vendors:
@@ -1801,7 +1930,7 @@ def view_vendors(request):
 
 @api_view(['GET'])
 def view_single_vendor(request, id):
-    vendor = get_object_or_404(Vendor.objects.select_related("address"), id=id)
+    vendor = get_object_or_404(Vendor.objects.select_related("address"), id=id, company=request.company)
 
     data = {
         "id": vendor.id,
@@ -1826,7 +1955,7 @@ def view_single_vendor(request, id):
 @api_view(['PUT'])
 def update_vendor(request, id):
     try:
-        vendor = Vendor.objects.select_related("address").get(id=id)
+        vendor = Vendor.objects.select_related("address").get(id=id, company=request.company)
     except Vendor.DoesNotExist:
         return HttpResponse("Vendor not found", status=404)
 
@@ -1873,7 +2002,7 @@ def update_vendor(request, id):
 @api_view(['DELETE'])
 def delete_vendor(request, id):
     try:
-        vendor = Vendor.objects.get(id=id)
+        vendor = Vendor.objects.get(id=id, company=request.company)
         vendor.delete()
         return JsonResponse({"message": "Vendor deleted successfully"})
     except Vendor.DoesNotExist:
@@ -1911,6 +2040,7 @@ def add_product(request):
 
     try:
         Product.objects.create(
+            company=request.company,
             name=name,
             product_code=product_code,
             sku=sku,
@@ -1936,7 +2066,10 @@ def add_product(request):
 
 @api_view(['GET'])
 def view_products(request):
-    products = Product.objects.select_related("vendor").all()
+    products = ( 
+        Product.objects.filter(company=request.company)
+        .select_related("vendor")
+    )
 
     data = []
     for p in products:
@@ -1967,7 +2100,7 @@ def view_products(request):
 
 @api_view(['GET'])
 def view_single_product(request, id):
-    product = get_object_or_404(Product.objects.select_related("vendor"), id=id)
+    product = get_object_or_404(Product.objects.select_related("vendor"), id=id, company=request.company)
 
     data = {
         "id": product.id,
@@ -1997,7 +2130,7 @@ def view_single_product(request, id):
 @api_view(['PUT'])
 def update_product(request, id):
     try:
-        product = Product.objects.get(id=id)
+        product = Product.objects.get(id=id, company=request.company)
     except Product.DoesNotExist:
         return HttpResponse("Product not found", status=404)
 
@@ -2046,7 +2179,7 @@ def update_product(request, id):
 @api_view(['DELETE'])
 def delete_product(request, id):
     try:
-        product = Product.objects.get(id=id)
+        product = Product.objects.get(id=id, company=request.company)
         product.delete()
         return JsonResponse({"message": "Product deleted successfully"})
     except Product.DoesNotExist:
@@ -2129,7 +2262,7 @@ def view_single_price_book(request, id):
 @api_view(['PUT'])
 def update_price_book(request, id):
     try:
-        price_book = PriceBook.objects.get(id=id)
+        price_book = PriceBook.objects.get(id=id, company=request.company)
     except PriceBook.DoesNotExist:
         return HttpResponse("Price book not found", status=404)
 
@@ -2154,7 +2287,7 @@ def update_price_book(request, id):
 @api_view(['DELETE'])
 def delete_price_book(request, id):
     try:
-        price_book = PriceBook.objects.get(id=id)
+        price_book = PriceBook.objects.get(id=id, company=request.company)
         price_book.delete()
         return JsonResponse({"message": "Price book deleted successfully"})
     except PriceBook.DoesNotExist:
@@ -2233,7 +2366,7 @@ def view_single_price_book_item(request, id):
 @api_view(['PUT'])
 def update_price_book_item(request, id):
     try:
-        item = PriceBookItem.objects.get(id=id)
+        item = PriceBookItem.objects.get(id=id, company=request.company)
     except PriceBookItem.DoesNotExist:
         return HttpResponse("Price book item not found", status=404)
 
@@ -2260,7 +2393,7 @@ def update_price_book_item(request, id):
 @api_view(['DELETE'])
 def delete_price_book_item(request, id):
     try:
-        item = PriceBookItem.objects.get(id=id)
+        item = PriceBookItem.objects.get(id=id, company=request.company)
         item.delete()
         return JsonResponse({"message": "Price book item deleted successfully"})
     except PriceBookItem.DoesNotExist:
@@ -2316,7 +2449,8 @@ def get_quote_prefill(request, quote_id):
             "assigned_to", "deal", "account",
             "billing_address", "shipping_address"
         ),
-        id=quote_id
+        id=quote_id,
+        company=request.company
     )
 
     # Get quote items if any (via sales orders linked to this quote)
@@ -2399,6 +2533,7 @@ def add_sales_order(request):
             deal_id = quote.deal_id  # adjust field name if it's e.g. quote.deal.id
 
         sales_order = SalesOrder.objects.create(
+            company=request.company,
             subject=subject,
             customer_id=customer_id,
             owner_id=owner_id or None,
@@ -2455,10 +2590,19 @@ def add_sales_order(request):
 
 @api_view(['GET'])
 def view_sales_orders(request):
-    orders = SalesOrder.objects.select_related(
-        "owner", "customer", "quote", "deal",
-        "billing_address", "shipping_address"
-    ).prefetch_related("items__product").all().order_by("-updated_at")
+    orders = (
+        SalesOrder.objects.filter(company=request.company)
+        .select_related(
+            "owner",
+            "customer",
+            "quote",
+            "deal",
+            "billing_address",
+            "shipping_address",
+        )
+        .prefetch_related("items__product")
+        .order_by("-updated_at")
+    )
 
     data = []
     for o in orders:
@@ -2507,11 +2651,8 @@ def view_sales_orders(request):
 @api_view(['GET'])
 def view_single_sales_order(request, id):
     order = get_object_or_404(
-        SalesOrder.objects.select_related(
-            "owner", "customer", "quote", "deal",
-            "billing_address", "shipping_address"
-        ).prefetch_related("items__product"),
-        id=id
+        SalesOrder.objects.select_related("owner", "customer", "quote", "deal", "billing_address", "shipping_address").prefetch_related("items__product"),
+        id=id, company=request.company
     )
 
     data = {
@@ -2559,7 +2700,7 @@ def view_single_sales_order(request, id):
 @api_view(['PUT'])
 def update_sales_order(request, id):
     try:
-        order = SalesOrder.objects.get(id=id)
+        order = SalesOrder.objects.get(id=id, company=request.company)
     except SalesOrder.DoesNotExist:
         return HttpResponse("Sales order not found", status=404)
 
@@ -2631,7 +2772,7 @@ def update_sales_order(request, id):
 @api_view(['DELETE'])
 def delete_sales_order(request, id):
     try:
-        order = SalesOrder.objects.get(id=id)
+        order = SalesOrder.objects.get(id=id, company=request.company)
         order.delete()
         return JsonResponse({"message": "Sales order deleted successfully"})
     except SalesOrder.DoesNotExist:
@@ -2648,7 +2789,8 @@ def get_sales_order_prefill(request, sales_order_id):
             "owner", "customer", "quote", "deal",
             "billing_address", "shipping_address"
         ).prefetch_related("items__product"),
-        id=sales_order_id
+        id=sales_order_id,
+        company=request.company
     )
 
     return JsonResponse({
@@ -2747,6 +2889,7 @@ def add_invoice(request):
             shipping_address = _create_address(shipping_data)
 
         invoice = Invoice.objects.create(
+            company=request.company,
             subject=subject,
             customer_id=customer_id,
             owner_id=owner_id or None,
@@ -2780,10 +2923,18 @@ def add_invoice(request):
 
 @api_view(['GET'])
 def view_invoices(request):
-    invoices = Invoice.objects.select_related(
-        "owner", "customer", "sales_order",
-        "billing_address", "shipping_address"
-    ).prefetch_related("items__product").all().order_by("-updated_at")
+    invoices = (
+        Invoice.objects.filter(company=request.company)
+        .select_related(
+            "owner",
+            "customer",
+            "sales_order",
+            "billing_address",
+            "shipping_address",
+        )
+        .prefetch_related("items__product")
+        .order_by("-updated_at")
+    )
 
     data = []
     for inv in invoices:
@@ -2828,11 +2979,8 @@ def view_invoices(request):
 @api_view(['GET'])
 def view_single_invoice(request, id):
     invoice = get_object_or_404(
-        Invoice.objects.select_related(
-            "owner", "customer", "sales_order",
-            "billing_address", "shipping_address"
-        ).prefetch_related("items__product"),
-        id=id
+        Invoice.objects.select_related("owner", "customer", "sales_order", "billing_address", "shipping_address").prefetch_related("items__product"),
+        id=id, company=request.company
     )
 
     data = {
@@ -2876,7 +3024,7 @@ def view_single_invoice(request, id):
 @api_view(['PUT'])
 def update_invoice(request, id):
     try:
-        invoice = Invoice.objects.get(id=id)
+        invoice = Invoice.objects.get(id=id, company=request.company)
     except Invoice.DoesNotExist:
         return HttpResponse("Invoice not found", status=404)
 
@@ -2938,7 +3086,7 @@ def update_invoice(request, id):
 @api_view(['DELETE'])
 def delete_invoice(request, id):
     try:
-        invoice = Invoice.objects.get(id=id)
+        invoice = Invoice.objects.get(id=id, company=request.company)
         invoice.delete()
         return JsonResponse({"message": "Invoice deleted successfully"})
     except Invoice.DoesNotExist:
@@ -2990,6 +3138,7 @@ def add_purchase_order(request):
             shipping_address = _create_address(shipping_data)
 
         purchase_order = PurchaseOrder.objects.create(
+            company=request.company,
             subject=subject,
             vendor_id=vendor_id,
             owner_id=owner_id or None,
@@ -3022,9 +3171,17 @@ def add_purchase_order(request):
 
 @api_view(['GET'])
 def view_purchase_orders(request):
-    orders = PurchaseOrder.objects.select_related(
-        "owner", "vendor", "billing_address", "shipping_address"
-    ).prefetch_related("items__product").all().order_by("-updated_at")
+    orders = (
+        PurchaseOrder.objects.filter(company=request.company)
+        .select_related(
+            "owner",
+            "vendor",
+            "billing_address",
+            "shipping_address",
+        )
+        .prefetch_related("items__product")
+        .order_by("-updated_at")
+    )
 
     data = []
     for o in orders:
@@ -3067,10 +3224,8 @@ def view_purchase_orders(request):
 @api_view(['GET'])
 def view_single_purchase_order(request, id):
     order = get_object_or_404(
-        PurchaseOrder.objects.select_related(
-            "owner", "vendor", "billing_address", "shipping_address"
-        ).prefetch_related("items__product"),
-        id=id
+        PurchaseOrder.objects.select_related("owner", "vendor", "billing_address", "shipping_address").prefetch_related("items__product"),
+        id=id, company=request.company
     )
 
     data = {
@@ -3112,7 +3267,7 @@ def view_single_purchase_order(request, id):
 @api_view(['PUT'])
 def update_purchase_order(request, id):
     try:
-        order = PurchaseOrder.objects.get(id=id)
+        order = PurchaseOrder.objects.get(id=id, company=request.company)
     except PurchaseOrder.DoesNotExist:
         return HttpResponse("Purchase order not found", status=404)
 
@@ -3170,7 +3325,7 @@ def update_purchase_order(request, id):
 @api_view(['DELETE'])
 def delete_purchase_order(request, id):
     try:
-        order = PurchaseOrder.objects.get(id=id)
+        order = PurchaseOrder.objects.get(id=id, company=request.company)
         order.delete()
         return JsonResponse({"message": "Purchase order deleted successfully"})
     except PurchaseOrder.DoesNotExist:

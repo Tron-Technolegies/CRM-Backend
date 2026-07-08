@@ -101,6 +101,7 @@ urlpatterns= [
     path('salesorder/single/view/<int:id>/', views.view_single_sales_order, name='sales-order-single'),
     path('salesorder/update/<int:id>/', views.update_sales_order, name='sales-order-update'),
     path('salesorder/delete/<int:id>/', views.delete_sales_order, name='sales-order-delete'),
+
     path('salesorder/quote-prefill/<int:quote_id>/', views.get_quote_prefill, name='sales-order-quote-prefill'),
 
     path('invoice/add/', views.add_invoice, name='invoice-add'),
@@ -108,6 +109,7 @@ urlpatterns= [
     path('invoice/single/view/<int:id>/', views.view_single_invoice, name='invoice-single'),
     path('invoice/update/<int:id>/', views.update_invoice, name='invoice-update'),
     path('invoice/delete/<int:id>/', views.delete_invoice, name='invoice-delete'),
+    
     path('invoice/sales-order-prefill/<int:sales_order_id>/', views.get_sales_order_prefill, name='invoice-sales-order-prefill'),
 
     path('purchaseorder/add/', views.add_purchase_order, name='purchase-order-add'),
