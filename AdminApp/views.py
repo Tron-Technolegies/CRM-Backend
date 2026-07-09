@@ -17,6 +17,8 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework.permissions import AllowAny
+from django.conf import settings
+from django.core.mail import send_mail
 
 
 # .............. authentication..............
@@ -219,6 +221,68 @@ def user_logout(request):
         return Response({"error": str(e)}, status=400)
 
 
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def accept_invitation(request):
+
+    token = request.data.get("token")
+    password = request.data.get("password")
+
+    if not token or not password:
+        return Response(
+            {
+                "message": "Token and password are required."
+            },
+            status=400
+        )
+
+    try:
+        staff = Staff.objects.get(
+
+            invitation_token=token,
+            is_accepted=False,
+
+        )
+
+    except Staff.DoesNotExist:
+
+        return Response(
+            {"message": "Invalid invitation."}, status=400)
+
+    user = User.objects.create_user(
+
+        username=staff.email,
+        email=staff.email,
+        password=password,
+        first_name=staff.full_name,
+
+    )
+
+    staff.user = user
+    staff.is_invited = False
+    staff.is_accepted = True
+    staff.invitation_token = None
+
+    print("Before save:", staff.is_invited)
+
+    staff.save()
+
+    staff.refresh_from_db()
+
+    print("After save:", staff.is_invited)
+
+    refresh = RefreshToken.for_user(user)
+
+    return Response({
+
+        "message": "Account created successfully",
+        "access": str(refresh.access_token),
+        "refresh": str(refresh),
+
+    })
+
+
+
 # ..............lead.......................
 @api_view(['POST'])
 def add_lead(request):
@@ -269,6 +333,7 @@ def view_leads(request):
     for i in leads:
         list.append(
             {
+                "c_name": i.company.name,
                 "id": i.id,
                 "name": i.full_name,
                 "phone": i.phone_number,
@@ -499,6 +564,7 @@ def delete_deal(request, id):
 # ...................customer...................
 @api_view(['POST'])
 def add_customer(request):
+    print("CUSTOMER PAYLOAD:", request.data)
     company_name = request.data.get("company_name")
     contact_name = request.data.get("contact_name")
     phone_number = request.data.get("phone_number")
@@ -507,6 +573,7 @@ def add_customer(request):
     status = request.data.get("status")
     lifetime_value = request.data.get("lifetime_value")
     deal_id = request.data.get("deal_id")
+    lead_id = request.data.get("lead_id")   # ← new: optional lead link
 
     if not company_name or not contact_name or not phone_number:
         return HttpResponse(
@@ -520,6 +587,17 @@ def add_customer(request):
             deal = Deal.objects.get(id=deal_id)
         except Deal.DoesNotExist:
             return HttpResponse("Deal not found", status=404)
+    
+    lead = None
+    if lead_id:
+        try:
+            lead = Lead.objects.get(id=lead_id, company=request.company)
+        except Lead.DoesNotExist:
+            return HttpResponse("Lead not found", status=404)
+
+        if lead.status == "converted":
+            return HttpResponse("Lead already converted to a customer", status=400)
+
 
     try:
         customer = Customer.objects.create(
@@ -538,6 +616,11 @@ def add_customer(request):
             deal.customer = customer
             deal.save()
 
+        if lead:
+            lead.status = "converted"
+            lead.converted_at = timezone.now()
+            lead.save()
+
         return HttpResponse("Customer created successfully", status=201)
 
     except Exception as e:
@@ -552,6 +635,7 @@ def view_customers(request):
 
     for i in customers:
         data.append({
+                "c_name": i.company.name,
                 "id": i.id,
                 "companyName": i.company_name,
                 "contactName": i.contact_name,
@@ -742,8 +826,9 @@ def delete_task(request, id):
 
 
 # ............staff(user)...............
-@api_view(['POST'])
+@api_view(["POST"])
 def add_staff(request):
+
     full_name = request.data.get("full_name")
     email = request.data.get("email")
     role = request.data.get("role")
@@ -752,23 +837,61 @@ def add_staff(request):
     if not full_name or not email or not role:
         return HttpResponse(
             "Full name, email and role are mandatory fields",
+            status=400,
+        )
+
+    if Staff.objects.filter(email=email).exists():
+        return HttpResponse(
+            "Email already exists",
             status=400
         )
 
     try:
-        Staff.objects.create(
+
+        staff = Staff.objects.create(
+
             company=request.company,
             full_name=full_name,
             email=email,
             role=role,
             department=department,
             is_invited=True,
+
         )
 
-        return HttpResponse("Staff created successfully", status=201)
+        invite_link = (
+            f"http://localhost:5173/staff/signup/"
+            f"?token={staff.invitation_token}"
+        )
+
+        subject = "You're invited to join CRM"
+
+        message = f"""
+Hello {staff.full_name},
+
+You have been invited to join {request.company.name}.
+
+Role : {staff.role}
+
+Click the link below to create your account.
+
+{invite_link}
+
+Thank you.
+"""
+
+        send_mail(
+            subject,
+            message,
+            settings.DEFAULT_FROM_EMAIL,
+            [staff.email],
+            fail_silently=False,
+        )
+
+        return HttpResponse( "Invitation sent successfully.", status=201)
 
     except Exception as e:
-        return HttpResponse(str(e), status=500)
+        return HttpResponse( str(e), status=500)
     
 
 
@@ -797,6 +920,7 @@ def view_single_staff(request, id):
     staff = get_object_or_404(Staff, id=id, company=request.company)
 
     data = {
+                "c_id":staff.company.name,
                 "id": staff.id,
                 "fullName": staff.full_name,
                 "email": staff.email,
@@ -922,15 +1046,15 @@ def report_view(request):
 
 # ......... convert lead to customer through button ...........
 @api_view(['GET'])
-def convert_lead_to_customer(request, lead_id):
-
+def get_lead_to_customer_prefill(request, lead_id):
+    """Prefill customer form from lead data"""
     try:
         lead = Lead.objects.get(id=lead_id, company=request.company)
     except Lead.DoesNotExist:
         return HttpResponse("Lead not found", status=404)
 
     if lead.status == "converted":
-        return HttpResponse("Lead already converted to a customer", status=400)
+        return JsonResponse({"message": "Lead already converted to a customer"}, status=400)
 
     prefilled_data = {
         "lead_id": lead.id,
@@ -939,7 +1063,7 @@ def convert_lead_to_customer(request, lead_id):
         "phone_number": lead.phone_number,
         "email": lead.email,
         "assigned_to": lead.assigned_to_id,
-        "industry": "", 
+        "industry": "",
     }
 
     return JsonResponse(prefilled_data, status=200)

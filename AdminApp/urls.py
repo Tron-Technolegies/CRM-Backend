@@ -30,6 +30,7 @@ urlpatterns= [
     path('task/update/<int:id>/', views.update_task, name='task-update'),
     path('task/delete/<int:id>/', views.delete_task, name='task-delete'),
 
+    path('staff/acceptinvitation/', views.accept_invitation, name='accept-invitation'),
     path('staff/add/', views.add_staff, name='staff-add'),
     path('staff/view/', views.view_staff, name='staff-view'),
     path('staff/single/view/<int:id>/', views.view_single_staff, name='view-single-staff'),
@@ -38,7 +39,7 @@ urlpatterns= [
 
     path('report/dashboard/', views.report_view, name='report-dashboard'),
 
-    path('leads/<int:lead_id>/convert/', views.convert_lead_to_customer, name='lead-to-customer'),
+    path('leads/<int:lead_id>/convert/', views.get_lead_to_customer_prefill, name='lead-to-customer'),
     path('leads/unconverted/', views.get_unconverted_leads, name='unconverted-leads'),
     path('deals/linkable/', views.get_linkable_deals, name='linkable-deals'),
 

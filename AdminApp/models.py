@@ -1,3 +1,5 @@
+import uuid
+
 from django.db import models
 from django.contrib.auth.models import User
 
@@ -31,36 +33,15 @@ class Staff(models.Model):
     role = models.CharField(max_length=50, choices=ROLE_CHOICES, blank=True, default="")
     department = models.CharField(max_length=100, blank=True, default="")
 
+    invitation_token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False, null=True, blank=True,)
+
     is_invited = models.BooleanField(default=False)
     invited_at = models.DateTimeField(auto_now_add=True)
+    is_accepted = models.BooleanField(default=False)
 
     def __str__(self):
         return self.full_name
 
-
-
-class Customer(models.Model):
-    STATUS_CHOICES = [
-        ("active", "Active"),
-        ("inactive", "Inactive"),
-    ]
-
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="customers")
-
-    company_name = models.CharField(max_length=255)
-    contact_name = models.CharField(max_length=255)
-    phone_number = models.CharField(max_length=20)
-    email = models.EmailField(blank=True, null=True)
-    industry = models.CharField(max_length=50)
-    status = models.CharField( max_length=20, choices=STATUS_CHOICES, default="active")
-    lifetime_value = models.DecimalField( max_digits=12, decimal_places=2, default=0 )
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        return self.company_name
-     
 
 
 class Lead(models.Model):
@@ -97,8 +78,9 @@ class Lead(models.Model):
     priority = models.CharField(max_length=20, choices=PRIORITY_CHOICES, default="Medium")
     lead_description = models.TextField(blank=True, null=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="new")
+    expected_closing_date = models.DateField(null=True, blank=True)
     
-    converted_customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name="originating_leads")
+    # converted_customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name="originating_leads")
     converted_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -106,6 +88,31 @@ class Lead(models.Model):
     def __str__(self):
         return self.full_name
     
+
+
+class Customer(models.Model):
+    STATUS_CHOICES = [
+        ("active", "Active"),
+        ("inactive", "Inactive"),
+    ]
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="customers")
+    customer = models.ForeignKey(Lead, on_delete=models.SET_NULL,null=True, blank=True, related_name="deals")
+
+    company_name = models.CharField(max_length=255)
+    contact_name = models.CharField(max_length=255)
+    phone_number = models.CharField(max_length=20)
+    email = models.EmailField(blank=True, null=True)
+    industry = models.CharField(max_length=50)
+    status = models.CharField( max_length=20, choices=STATUS_CHOICES, default="active")
+    lifetime_value = models.DecimalField( max_digits=12, decimal_places=2, default=0 )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.company_name
+     
 
 
 class Deal(models.Model):
@@ -135,6 +142,7 @@ class Deal(models.Model):
     ]
 
     company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="deals")
+    customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name="deals")
 
     deal_name = models.CharField(max_length=255)
     company_name = models.CharField(max_length=255)

@@ -12,6 +12,7 @@ class CompanyMiddleware:
             "/api/admin/staff/login/",
             "/api/admin/staff/signup/",
             "/api/admin/auth/verify-invite/",
+            "/api/admin/staff/acceptinvitation/",
             "/api/token/",
             "/api/token/refresh/",
             "/admin/",
