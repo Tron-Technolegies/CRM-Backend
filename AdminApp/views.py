@@ -484,6 +484,7 @@ def view_deals(request):
 
     for i in deals:
         list.append({
+            "c_name": i.company.name,
             "id": i.id,
             "name": i.deal_name,
             "company_name": i.company_name,

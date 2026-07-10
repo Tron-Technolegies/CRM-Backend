@@ -97,7 +97,7 @@ class Customer(models.Model):
     ]
 
     company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="customers")
-    customer = models.ForeignKey(Lead, on_delete=models.SET_NULL,null=True, blank=True, related_name="deals")
+    lead = models.ForeignKey(Lead, on_delete=models.SET_NULL,null=True, blank=True, related_name="customer")
 
     company_name = models.CharField(max_length=255)
     contact_name = models.CharField(max_length=255)
@@ -143,6 +143,7 @@ class Deal(models.Model):
 
     company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="deals")
     customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name="deals")
+    lead = models.ForeignKey(Lead, on_delete=models.SET_NULL, null=True, blank=True, related_name="deals")
 
     deal_name = models.CharField(max_length=255)
     company_name = models.CharField(max_length=255)
