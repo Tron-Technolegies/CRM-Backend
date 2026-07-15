@@ -7,7 +7,7 @@ from django.db.models.functions import TruncWeek
 from django.db.models import Count
 from django.db import transaction
 
-from AdminApp.models import Accounts, Address, Call, Company, Customer, Deal, Invoice, InvoiceItem, Lead, Meeting, PicklistOption, PriceBook, PriceBookItem, Product, PurchaseOrder, PurchaseOrderItem, QuoteProduct, Quotes, SalesOrder, SalesOrderItem, Staff, Task, Vendor
+from AdminApp.models import Accounts, Address, Call, Case, CaseSolution, Company, Customer, Deal, Invoice, InvoiceItem, Lead, Meeting, PicklistOption, PriceBook, PriceBookItem, Product, PurchaseOrder, PurchaseOrderItem, QuoteProduct, Quotes, SalesOrder, SalesOrderItem, Service, Staff, Task, Vendor
 
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
@@ -1515,7 +1515,7 @@ def add_quote(request):
         print("ADD QUOTE ERROR:", str(e))
         return HttpResponse(str(e), status=500)
 
-
+ 
 @api_view(['GET'])
 def view_quotes(request):
     quotes = ( Quotes.objects.filter(company=request.company)
@@ -3455,3 +3455,408 @@ def delete_purchase_order(request, id):
         return JsonResponse({"message": "Purchase order deleted successfully"})
     except PurchaseOrder.DoesNotExist:
         return HttpResponse("Purchase order not found", status=404)
+    
+
+
+# ............... case ...............
+@api_view(['POST'])
+def add_case(request):
+    subject = request.data.get("subject")
+    description = request.data.get("description")
+
+    if not subject or not description:
+        return HttpResponse("Subject and description are required", status=400)
+
+    try:
+        case = Case.objects.create(
+            company=request.company,
+            subject=subject,
+            description=description,
+            customer_id=request.data.get("customer_id") or None,
+            account_id=request.data.get("account_id") or None,
+            product_id=request.data.get("product_id") or None,
+            assigned_to_id=request.data.get("assigned_to") or None,
+            priority=request.data.get("priority", "medium"),
+            status=request.data.get("status", "open"),
+            source=request.data.get("source", "manual"),
+            resolution=request.data.get("resolution", ""),
+            created_by=request.staff,  # auto-fill logged in user
+        )
+
+        return JsonResponse({
+            "message": "Case created successfully",
+            "case_number": case.case_number,
+            "id": case.id,
+        }, status=201)
+
+    except Exception as e:
+        print("ADD CASE ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['GET'])
+def view_cases(request):
+    cases = Case.objects.filter(company=request.company).select_related(
+        "customer", "account", "product", "assigned_to", "created_by"
+    ).order_by("-updated_at")
+
+    data = []
+    for c in cases:
+        data.append({
+            "c_name": c.company.name,
+            "id": c.id,
+            "caseNumber": c.case_number,
+            "subject": c.subject,
+            "description": c.description,
+            "status": c.status,
+            "priority": c.priority,
+            "source": c.source,
+            "resolution": c.resolution,
+            "customer": c.customer.company_name if c.customer else "—",
+            "customerId": c.customer.id if c.customer else None,
+            "account": c.account.account_name if c.account else "—",
+            "accountId": c.account.id if c.account else None,
+            "product": c.product.name if c.product else "—",
+            "productId": c.product.id if c.product else None,
+            "assignedTo": c.assigned_to.full_name if c.assigned_to else "—",
+            "assignedToId": c.assigned_to.id if c.assigned_to else None,
+            "createdBy": c.created_by.full_name if c.created_by else "—",
+            "closedAt": c.closed_at.isoformat() if c.closed_at else None,
+            "createdAt": c.created_at.isoformat(),
+            "updatedAt": c.updated_at.isoformat(),
+        })
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['GET'])
+def view_single_case(request, id):
+    case = get_object_or_404(
+        Case.objects.select_related("customer", "account", "product", "assigned_to", "created_by"),
+        id=id, company=request.company
+    )
+
+    return JsonResponse({
+        "id": case.id,
+        "caseNumber": case.case_number,
+        "subject": case.subject,
+        "description": case.description,
+        "status": case.status,
+        "priority": case.priority,
+        "source": case.source,
+        "resolution": case.resolution,
+        "customer": case.customer.company_name if case.customer else "—",
+        "customerId": case.customer.id if case.customer else None,
+        "account": case.account.account_name if case.account else "—",
+        "accountId": case.account.id if case.account else None,
+        "product": case.product.name if case.product else "—",
+        "productId": case.product.id if case.product else None,
+        "assignedTo": case.assigned_to.full_name if case.assigned_to else "—",
+        "assignedToId": case.assigned_to.id if case.assigned_to else None,
+        "createdBy": case.created_by.full_name if case.created_by else "—",
+        "closedAt": case.closed_at.isoformat() if case.closed_at else None,
+        "createdAt": case.created_at.isoformat(),
+        "updatedAt": case.updated_at.isoformat(),
+    })
+
+
+@api_view(['PUT'])
+def update_case(request, id):
+    try:
+        case = Case.objects.get(id=id, company=request.company)
+    except Case.DoesNotExist:
+        return HttpResponse("Case not found", status=404)
+
+    try:
+        case.subject = request.data.get("subject") or case.subject
+        case.description = request.data.get("description") or case.description
+        case.priority = request.data.get("priority") or case.priority
+        case.status = request.data.get("status") or case.status
+        case.source = request.data.get("source") or case.source
+        case.resolution = request.data.get("resolution", case.resolution)
+
+        customer_id = request.data.get("customer_id")
+        if customer_id:
+            case.customer_id = customer_id
+
+        account_id = request.data.get("account_id")
+        if account_id:
+            case.account_id = account_id
+
+        product_id = request.data.get("product_id")
+        if product_id:
+            case.product_id = product_id
+
+        assigned_to_id = request.data.get("assigned_to")
+        if assigned_to_id:
+            case.assigned_to_id = assigned_to_id
+
+        case.save()
+        return HttpResponse("Case updated successfully", status=200)
+
+    except Exception as e:
+        print("UPDATE CASE ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['DELETE'])
+def delete_case(request, id):
+    try:
+        case = Case.objects.get(id=id, company=request.company)
+        case.delete()
+        return JsonResponse({"message": "Case deleted successfully"})
+    except Case.DoesNotExist:
+        return HttpResponse("Case not found", status=404)
+    
+
+
+@api_view(['POST'])
+def add_case_solution(request):
+    company_id = request.data.get("company_id")
+    title = request.data.get("title")
+    category = request.data.get("category")
+    content = request.data.get("content")
+    status = request.data.get("status", "published")
+    created_by_id = request.data.get("created_by_id")
+
+    if not company_id or not title or not category or not content:
+        return HttpResponse("company_id, title, category and content are required", status=400)
+
+    company = get_object_or_404(Company, id=company_id)
+
+    created_by = None
+    if created_by_id:
+        created_by = get_object_or_404(Staff, id=created_by_id)
+
+    try:
+        CaseSolution.objects.create(
+            company=company,
+            title=title,
+            category=category,
+            content=content,
+            status=status,
+            created_by=created_by,
+        )
+        return HttpResponse("Case solution created successfully", status=201)
+
+    except Exception as e:
+        print("ADD CASE SOLUTION ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['GET'])
+def view_case_solutions(request):
+    case_solutions = CaseSolution.objects.select_related("company", "created_by").all()
+
+    company_id = request.query_params.get("company_id")
+    if company_id:
+        case_solutions = case_solutions.filter(company_id=company_id)
+
+    category = request.query_params.get("category")
+    if category:
+        case_solutions = case_solutions.filter(category=category)
+
+    status_param = request.query_params.get("status")
+    if status_param:
+        case_solutions = case_solutions.filter(status=status_param)
+
+    data = []
+    for cs in case_solutions:
+        data.append({
+            "id": cs.id,
+            "companyId": cs.company.id,
+            "companyName": cs.company.name if hasattr(cs.company, "name") else str(cs.company),
+            "title": cs.title,
+            "category": cs.category,
+            "content": cs.content,
+            "status": cs.status,
+            "createdById": cs.created_by.id if cs.created_by else None,
+            "createdByName": str(cs.created_by) if cs.created_by else "—",
+            "createdAt": cs.created_at.isoformat(),
+            "updatedAt": cs.updated_at.isoformat(),
+        })
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['GET'])
+def view_single_case_solution(request, id):
+    cs = get_object_or_404(CaseSolution.objects.select_related("company", "created_by"), id=id)
+
+    data = {
+        "id": cs.id,
+        "companyId": cs.company.id,
+        "companyName": cs.company.name if hasattr(cs.company, "name") else str(cs.company),
+        "title": cs.title,
+        "category": cs.category,
+        "content": cs.content,
+        "status": cs.status,
+        "createdById": cs.created_by.id if cs.created_by else None,
+        "createdByName": str(cs.created_by) if cs.created_by else "—",
+        "createdAt": cs.created_at.isoformat(),
+        "updatedAt": cs.updated_at.isoformat(),
+    }
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['PUT'])
+def update_case_solution(request, id):
+    try:
+        cs = CaseSolution.objects.get(id=id)
+    except CaseSolution.DoesNotExist:
+        return HttpResponse("Case solution not found", status=404)
+
+    try:
+        company_id = request.data.get("company_id")
+        if company_id:
+            cs.company = get_object_or_404(Company, id=company_id)
+
+        cs.title = request.data.get("title") or cs.title
+        cs.category = request.data.get("category") or cs.category
+        cs.content = request.data.get("content") or cs.content
+        cs.status = request.data.get("status", cs.status)
+
+        created_by_id = request.data.get("created_by_id")
+        if created_by_id:
+            cs.created_by = get_object_or_404(Staff, id=created_by_id)
+        elif created_by_id == "":
+            cs.created_by = None
+
+        cs.save()
+        return HttpResponse("Case solution updated successfully", status=200)
+
+    except Exception as e:
+        print("UPDATE CASE SOLUTION ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['DELETE'])
+def delete_case_solution(request, id):
+    try:
+        cs = CaseSolution.objects.get(id=id)
+        cs.delete()
+        return JsonResponse({"message": "Case solution deleted successfully"})
+    except CaseSolution.DoesNotExist:
+        return HttpResponse("Case solution not found", status=404)
+    
+
+
+# ............... services ..................
+@api_view(['POST'])
+def add_service(request):
+    service_name = request.data.get("service_name")
+    service_code = request.data.get("service_code")
+    unit_price = request.data.get("unit_price")
+
+    if not service_name or not service_code or not unit_price:
+        return HttpResponse("Service name, service code and unit price are required", status=400)
+
+    if Service.objects.filter(service_code=service_code, company=request.company).exists():
+        return HttpResponse("Service code already exists", status=400)
+
+    try:
+        Service.objects.create(
+            company=request.company,
+            service_name=service_name,
+            service_code=service_code,
+            category=request.data.get("category", ""),
+            description=request.data.get("description", ""),
+            unit_price=unit_price,
+            tax_percentage=request.data.get("tax_percentage", 0),
+            billing_type=request.data.get("billing_type", "fixed"),
+            duration=request.data.get("duration", ""),
+            status=request.data.get("status", "active"),
+        )
+        return HttpResponse("Service created successfully", status=201)
+
+    except Exception as e:
+        print("ADD SERVICE ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['GET'])
+def view_services(request):
+    services = Service.objects.filter(company=request.company)
+
+    data = []
+    for s in services:
+        data.append({
+            "c.name": s.company.name,
+            "id": s.id,
+            "serviceName": s.service_name,
+            "serviceCode": s.service_code,
+            "category": s.category,
+            "description": s.description,
+            "unitPrice": float(s.unit_price),
+            "taxPercentage": float(s.tax_percentage),
+            "billingType": s.billing_type,
+            "duration": s.duration,
+            "status": s.status,
+            "createdAt": s.created_at.isoformat(),
+            "updatedAt": s.updated_at.isoformat(),
+        })
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['GET'])
+def view_single_service(request, id):
+    service = get_object_or_404(Service, id=id, company=request.company)
+
+    return JsonResponse({
+        "c.name": service.company.name,
+        "id": service.id,
+        "serviceName": service.service_name,
+        "serviceCode": service.service_code,
+        "category": service.category,
+        "description": service.description,
+        "unitPrice": float(service.unit_price),
+        "taxPercentage": float(service.tax_percentage),
+        "billingType": service.billing_type,
+        "duration": service.duration,
+        "status": service.status,
+        "createdAt": service.created_at.isoformat(),
+        "updatedAt": service.updated_at.isoformat(),
+    })
+
+
+@api_view(['PUT'])
+def update_service(request, id):
+    try:
+        service = Service.objects.get(id=id, company=request.company)
+    except Service.DoesNotExist:
+        return HttpResponse("Service not found", status=404)
+
+    try:
+        service.service_name = request.data.get("service_name") or service.service_name
+        service.category = request.data.get("category", service.category)
+        service.description = request.data.get("description", service.description)
+        service.unit_price = request.data.get("unit_price") or service.unit_price
+        service.tax_percentage = request.data.get("tax_percentage", service.tax_percentage)
+        service.billing_type = request.data.get("billing_type", service.billing_type)
+        service.duration = request.data.get("duration", service.duration)
+        service.status = request.data.get("status", service.status)
+
+        new_code = request.data.get("service_code")
+        if new_code and new_code != service.service_code:
+            if Service.objects.filter(service_code=new_code, company=request.company).exists():
+                return HttpResponse("Service code already exists", status=400)
+            service.service_code = new_code
+
+        service.save()
+        return HttpResponse("Service updated successfully", status=200)
+
+    except Exception as e:
+        print("UPDATE SERVICE ERROR:", str(e))
+        return HttpResponse(str(e), status=500)
+
+
+@api_view(['DELETE'])
+def delete_service(request, id):
+    try:
+        service = Service.objects.get(id=id, company=request.company)
+        service.delete()
+        return JsonResponse({"message": "Service deleted successfully"})
+    except Service.DoesNotExist:
+        return HttpResponse("Service not found", status=404)

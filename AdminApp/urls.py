@@ -119,4 +119,22 @@ urlpatterns= [
     path('purchaseorder/update/<int:id>/', views.update_purchase_order, name='purchase-order-update'),
     path('purchaseorder/delete/<int:id>/', views.delete_purchase_order, name='purchase-order-delete'),
 
+    path('case/add/', views.add_case, name='case-add'),
+    path('case/view/', views.view_cases, name='case-view'),
+    path('case/single/view/<int:id>/', views.view_single_case, name='case-single'),
+    path('case/update/<int:id>/', views.update_case, name='case-update'),
+    path('case/delete/<int:id>/', views.delete_case, name='case-delete'),
+
+    path('casesolutions/add/', views.add_case_solution, name='add_case_solution'),
+    path('casesolutions/view/', views.view_case_solutions, name='view_case_solutions'),
+    path('casesolutions/single/view/<int:id>/', views.view_single_case_solution, name='view_single_case_solution'),
+    path('casesolutions/update/<int:id>/', views.update_case_solution, name='update_case_solution'),
+    path('casesolutions/delete/<int:id>/', views.delete_case_solution, name='delete_case_solution'),
+
+    path('service/add/', views.add_service, name='service-add'),
+    path('service/view/', views.view_services, name='service-view'),
+    path('service/single/view/<int:id>/', views.view_single_service, name='service-single'),
+    path('service/update/<int:id>/', views.update_service, name='service-update'),
+    path('service/delete/<int:id>/', views.delete_service, name='service-delete'),
+
 ]

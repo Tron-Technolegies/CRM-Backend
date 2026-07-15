@@ -1,3 +1,4 @@
+from datetime import timezone
 import uuid
 
 from django.db import models
@@ -167,38 +168,6 @@ class Deal(models.Model):
     
 
 
-
-class Task(models.Model):
-    PRIORITY_CHOICES = [
-        ("low", "Low"),
-        ("medium", "Medium"),
-        ("high", "High"),
-    ]
-
-    STATUS_CHOICES = [
-        ("pending", "Pending"),
-        ("in_progress", "In Progress"),
-        ("completed", "Completed"),
-    ]
-
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="tasks")
-
-    title = models.CharField(max_length=255)
-    description = models.TextField(blank=True, null=True)
-    assigned_to = models.ForeignKey( Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="tasks")
-    related_to = models.CharField( max_length=255, blank=True, null=True, help_text="e.g. Deal: Website Redesign")
-    priority = models.CharField( max_length=10, choices=PRIORITY_CHOICES)
-    status = models.CharField( max_length=20, choices=STATUS_CHOICES, default="pending")
-    due_date = models.DateField()
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        return self.title
-    
-
-
 class PicklistOption(models.Model):
     FIELD_CHOICES = [
         ("lead_status", "Lead Status"),
@@ -313,6 +282,64 @@ class Product(models.Model):
 
     def __str__(self):
         return self.name
+    
+
+
+class Service(models.Model):
+    STATUS_CHOICES = [
+        ("active", "Active"),
+        ("inactive", "Inactive"),
+    ]
+
+    BILLING_TYPE_CHOICES = [
+        ("fixed", "Fixed Price"),
+        ("hourly", "Hourly"),
+        ("daily", "Daily"),
+        ("monthly", "Monthly"),
+        ("yearly", "Yearly"),
+    ]
+
+    company = models.ForeignKey(
+        Company,
+        on_delete=models.CASCADE,
+        related_name="services"
+    )
+
+    service_name = models.CharField(max_length=255)
+    service_code = models.CharField(max_length=50, unique=True)
+
+    category = models.CharField(max_length=100, blank=True)
+    description = models.TextField(blank=True)
+
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2)
+    tax_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+
+    billing_type = models.CharField(
+        max_length=20,
+        choices=BILLING_TYPE_CHOICES,
+        default="fixed"
+    )
+
+    duration = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="Example: 2 Hours, 30 Days, 1 Month"
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default="active"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["service_name"]
+
+    def __str__(self):
+        return self.service_name
 
 
 
@@ -359,6 +386,7 @@ class QuoteProduct(models.Model):
     quote = models.ForeignKey(Quotes, on_delete=models.CASCADE, related_name="items")
     
     product = models.ForeignKey( Product, on_delete=models.CASCADE)
+    service = models.ForeignKey( Service, on_delete=models.CASCADE, null=True)
     description = models.TextField(blank=True, null=True)
     
     quantity = models.PositiveIntegerField(default=1)
@@ -371,6 +399,104 @@ class QuoteProduct(models.Model):
     def __str__(self):
         return f"{self.product} (Quote: {self.quote.subject})"
     
+
+
+class Case(models.Model):
+
+    STATUS_CHOICES = [
+        ("open", "Open"),
+        ("in_progress", "In Progress"),
+        ("waiting_customer", "Waiting for Customer"),
+        ("waiting_third_party", "Waiting for Third Party"),
+        ("resolved", "Resolved"),
+        ("closed", "Closed"),
+    ]
+
+    PRIORITY_CHOICES = [
+        ("low", "Low"),
+        ("medium", "Medium"),
+        ("high", "High"),
+        ("urgent", "Urgent"),
+    ]
+
+    SOURCE_CHOICES = [
+        ("email", "Email"),
+        ("phone", "Phone"),
+        ("website", "Website"),
+        ("chat", "Live Chat"),
+        ("whatsapp", "WhatsApp"),
+        ("social", "Social Media"),
+        ("manual", "Manual"),
+    ]
+
+    case_number = models.CharField(max_length=20, unique=True)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="cases")
+    subject = models.CharField(max_length=255)
+    description = models.TextField()
+    customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True)
+    account = models.ForeignKey(Accounts, on_delete=models.SET_NULL, null=True, blank=True)
+    product = models.ForeignKey(Product, on_delete=models.SET_NULL, null=True, blank=True)
+    assigned_to = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="assigned_cases")
+    priority = models.CharField(max_length=10, choices=PRIORITY_CHOICES, default="medium")
+    status = models.CharField(max_length=25, choices=STATUS_CHOICES, default="open")
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default="manual")
+    resolution = models.TextField(blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey( Staff, on_delete=models.SET_NULL, null=True, related_name="created_cases")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        if not self.case_number:
+            last_case = Case.objects.order_by("-id").first()
+            next_number = (int(last_case.case_number.split("-")[1]) + 1) if last_case else 1
+            self.case_number = f"CASE-{next_number:05d}"
+
+        if self.status in ("closed", "resolved") and not self.closed_at:
+            self.closed_at = timezone.now()
+        elif self.status not in ("closed", "resolved"):
+            self.closed_at = None
+
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.case_number
+
+
+
+class Task(models.Model):
+    PRIORITY_CHOICES = [
+        ("low", "Low"),
+        ("medium", "Medium"),
+        ("high", "High"),
+    ]
+
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("in_progress", "In Progress"),
+        ("completed", "Completed"),
+    ]
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="tasks")
+
+    case = models.ForeignKey(Case, on_delete=models.CASCADE, null=True, blank=True)
+
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True, null=True)
+    assigned_to = models.ForeignKey( Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="tasks")
+    related_to = models.CharField( max_length=255, blank=True, null=True, help_text="e.g. Deal: Website Redesign")
+    priority = models.CharField( max_length=10, choices=PRIORITY_CHOICES)
+    status = models.CharField( max_length=20, choices=STATUS_CHOICES, default="pending")
+    due_date = models.DateField()
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.title
+    
+
 
 
 class Meeting(models.Model):
@@ -401,6 +527,8 @@ class Meeting(models.Model):
     ]
 
     company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="meetings")
+
+    case = models.ForeignKey(Case, on_delete=models.CASCADE, null=True, blank=True)
 
     title = models.CharField(max_length=255)
     meeting_venue = models.CharField(max_length=50, choices=VENUE_CHOICES, default="online")
@@ -444,6 +572,8 @@ class Call(models.Model):
     ]
 
     company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="calls")
+
+    case = models.ForeignKey(Case, on_delete=models.CASCADE, null=True, blank=True)
 
     subject = models.CharField(max_length=200)
     call_type = models.CharField(max_length=20, choices=CALL_TYPE)
@@ -735,3 +865,15 @@ class PurchaseOrderItem(models.Model):
 
     def __str__(self):
         return f"{self.purchase_order.purchase_order_number} - {self.product.name}"
+    
+
+
+class CaseSolution(models.Model):
+    company = models.ForeignKey(Company, on_delete=models.CASCADE)
+    title = models.CharField(max_length=255)
+    category = models.CharField(max_length=100)
+    content = models.TextField()
+    status = models.CharField(max_length=20, default="published")
+    created_by = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
