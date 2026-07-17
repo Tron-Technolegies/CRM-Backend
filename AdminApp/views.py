@@ -1,6 +1,7 @@
 from django.utils import timezone
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, render
+from rest_framework.permissions import AllowAny
 from rest_framework.decorators import api_view, permission_classes
 from django.db.models import Sum
 from django.db.models.functions import TruncWeek
@@ -16,7 +17,6 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.views.decorators.csrf import csrf_exempt
-from rest_framework.permissions import AllowAny
 from django.conf import settings
 from django.core.mail import send_mail
 
