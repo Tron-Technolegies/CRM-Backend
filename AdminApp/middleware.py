@@ -34,7 +34,9 @@ class CompanyMiddleware:
             staff = user.staff
             request.company = staff.company
             request.staff = staff
-        except Exception:
-            return JsonResponse({"message": "Invalid or expired token"}, status=401)
+
+        except Exception as e:
+            print("MIDDLEWARE ERROR:", e)
+            return JsonResponse({"message": str(e)}, status=401)
 
         return self.get_response(request)
