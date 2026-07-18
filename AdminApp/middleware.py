@@ -8,6 +8,9 @@ class CompanyMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
+        print("PATH:", request.path)
+        print("AUTH HEADER:", request.headers.get("Authorization"))
+
         public_paths = [
             "/api/admin/staff/login/",
             "/api/admin/staff/signup/",
