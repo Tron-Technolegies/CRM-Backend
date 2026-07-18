@@ -1181,6 +1181,7 @@ def delete_picklist_option(request, id):
 
 
 # .............. account ................
+
 @csrf_exempt
 @api_view(['POST'])
 def add_account(request):
@@ -1295,7 +1296,7 @@ def view_accounts(request):
 
 
 @csrf_exempt
-@api_view(['PUT'])
+@api_view(['POST'])
 def update_account(request, id):
     try:
         account = Accounts.objects.get(id=id, company=request.company)
