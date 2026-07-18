@@ -1225,6 +1225,7 @@ def add_account(request):
             )
 
         Accounts.objects.create(
+            company=request.company,
             account_name=account_name,
             assigned_to_id=assigned_to_id,
             phone_number=phone_number,
