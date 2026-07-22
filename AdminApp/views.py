@@ -282,8 +282,12 @@ def accept_invitation(request):
     })
 
 
+    
+
+
 
 # ..............lead.......................
+
 @api_view(['POST'])
 def add_lead(request):
     full_name = request.data.get("full_name")
@@ -1428,9 +1432,9 @@ def add_quote(request):
     account_id = request.data.get("account_id")
     billing_data = request.data.get("billing_add")
     shipping_data = request.data.get("shipping_add")
-    
+
     # 1. Grab the products array from payload
-    products_data = request.data.get("products", []) 
+    products_data = request.data.get("products", [])
 
     if not subject:
         return HttpResponse("Subject is required", status=400)
@@ -1447,21 +1451,29 @@ def add_quote(request):
 
         if account_id:
             try:
-                account = Accounts.objects.select_related("billing_address", "shipping_address").get(id=account_id)
+                account = Accounts.objects.select_related(
+                    "billing_address",
+                    "shipping_address"
+                ).get(id=account_id)
             except Accounts.DoesNotExist:
                 return HttpResponse("Account not found", status=404)
-        elif deal and deal.account_id: # Updated to your customer target field safely
-            account = deal.account 
+        elif deal and deal.account_id:
+            account = deal.account
 
-        # Wrap database operations in an atomic block
         with transaction.atomic():
+
             billing_address = None
             if billing_data:
                 billing_address = Address.objects.create(**billing_data)
             elif account and account.billing_address:
                 src = account.billing_address
                 billing_address = Address.objects.create(
-                    country=src.country, address=src.address,street_address=src.street_address, city=src.city, state=src.state, zip_code=src.zip_code
+                    country=src.country,
+                    address=src.address,
+                    street_address=src.street_address,
+                    city=src.city,
+                    state=src.state,
+                    zip_code=src.zip_code,
                 )
 
             shipping_address = None
@@ -1470,10 +1482,14 @@ def add_quote(request):
             elif account and account.shipping_address:
                 src = account.shipping_address
                 shipping_address = Address.objects.create(
-                    country=src.country, address=src.address,street_address=src.street_address, city=src.city, state=src.state, zip_code=src.zip_code
+                    country=src.country,
+                    address=src.address,
+                    street_address=src.street_address,
+                    city=src.city,
+                    state=src.state,
+                    zip_code=src.zip_code,
                 )
 
-            # 2. Save the primary Quote header record
             quote = Quotes.objects.create(
                 company=request.company,
                 subject=subject,
@@ -1487,17 +1503,24 @@ def add_quote(request):
                 shipping_address=shipping_address,
             )
 
-            # 3. Create individual QuoteProduct instances safely inside transaction block
+            # Save Quote Products
             for item in products_data:
-                product = get_object_or_404(Product, id=item.get("product"))
+
+                product = get_object_or_404(
+                    Product,
+                    id=item.get("product")
+                )
 
                 quantity = int(item.get("quantity", 1))
-                list_price = product.unit_price
+                list_price = float(product.unit_price)
                 discount = float(item.get("discount", 0))
                 tax = float(product.tax_percentage)
 
-                amount = quantity * float(list_price)
-                total = (amount - discount) + ((amount - discount) * tax / 100)
+                # Correct calculation
+                amount = quantity * list_price
+                discounted_amount = amount - discount
+                tax_amount = discounted_amount * tax / 100
+                total = discounted_amount + tax_amount
 
                 QuoteProduct.objects.create(
                     quote=quote,
@@ -1511,34 +1534,54 @@ def add_quote(request):
                     total=total,
                 )
 
-        return HttpResponse("Quote and line items created successfully", status=201)
+        return HttpResponse(
+            "Quote and line items created successfully",
+            status=201
+        )
 
     except Exception as e:
         print("ADD QUOTE ERROR:", str(e))
         return HttpResponse(str(e), status=500)
+    
+    
 
- 
 @api_view(['GET'])
 def view_quotes(request):
-    quotes = ( Quotes.objects.filter(company=request.company)
+    quotes = (
+        Quotes.objects.filter(company=request.company)
         .prefetch_related("items")
-        .select_related( "assigned_to", "deal", "account", "billing_address", "shipping_address",)
+        .select_related(
+            "assigned_to",
+            "deal",
+            "account",
+            "billing_address",
+            "shipping_address",
+        )
         .order_by("-updated_at")
     )
 
     data = []
     for i in quotes:
+
+        # Calculate Grand Total
+        grand_total = sum(item.total for item in i.items.all())
+
         data.append({
             "id": i.id,
             "subject": i.subject,
             "quoteStage": i.quote_stage,
+            "contactName": i.contact_name,
             "validUntil": str(i.valid_until) if i.valid_until else None,
-            "assignedTo": i.assigned_to.full_name if i.assigned_to else "—",
+            "quoteOwner": i.assigned_to.full_name if i.assigned_to else "—",
             "dealName": i.deal.deal_name if i.deal else "—",
-            "accountName": i.account.account_name if i.account else None,
+            "accountName": i.account.account_name if i.account else "—",
             "billingAddress": _serialize_address(i.billing_address),
             "shippingAddress": _serialize_address(i.shipping_address),
-            "products": _serialize_products(i), # Appends the linked items list to the JSON payload
+            "products": _serialize_products(i),
+
+            # Added Grand Total
+            "grandTotal": grand_total,
+
             "createdAt": i.created_at.isoformat(),
         })
 
@@ -1615,31 +1658,28 @@ def update_quote(request, id):
 
     except Exception as e:
         return HttpResponse(str(e), status=500)
-    
 
-@api_view(['DELETE'])
+from rest_framework import status
+
+
+@api_view(["DELETE"])
 def delete_quote(request, id):
     try:
-        quote = Quotes.objects.select_related(
-            "billing_address", "shipping_address"
-        ).get(id=id, company=request.company)
-
-        billing = quote.billing_address
-        shipping = quote.shipping_address
+        quote = Quotes.objects.get(id=id, company=request.company)
 
         quote.delete()
 
-        if billing and billing.id is not None:
-            billing.delete()
-        if shipping and shipping.id is not None:
-            shipping.delete()
-
-        return JsonResponse({"message": "Quote deleted successfully"})
+        return Response(
+            {"message": "Quote deleted successfully"},
+            status=status.HTTP_200_OK
+        )
 
     except Quotes.DoesNotExist:
-        return HttpResponse("Quote not found", status=404)
+        return Response(
+            {"error": "Quote not found"},
+            status=status.HTTP_404_NOT_FOUND
+        )
     
-
 
 # .................. meeting ...............
 @api_view(['POST'])
@@ -2136,8 +2176,9 @@ def delete_vendor(request, id):
         return HttpResponse("Vendor not found", status=404)
     
 
-
 # .............. products ................
+
+
 @api_view(['POST'])
 def add_product(request):
     name = request.data.get("name")
@@ -2189,6 +2230,7 @@ def add_product(request):
     except Exception as e:
         print("ADD PRODUCT ERROR:", str(e))
         return HttpResponse(str(e), status=500)
+
 
 
 @api_view(['GET'])
