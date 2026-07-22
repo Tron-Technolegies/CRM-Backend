@@ -39,7 +39,8 @@ urlpatterns= [
 
     path('report/dashboard/', views.report_view, name='report-dashboard'),
 
-    path('leads/<int:lead_id>/convert/', views.get_lead_to_customer_prefill, name='lead-to-customer'),
+    path('lead/customer/prefill/<int:lead_id>/', views.get_lead_to_customer_prefill, name='lead-to-customer'),
+    path('lead/convert/<int:lead_id>/', views.convert_lead, name='lead-convert'),
     path('leads/unconverted/', views.get_unconverted_leads, name='unconverted-leads'),
     path('deals/linkable/', views.get_linkable_deals, name='linkable-deals'),
 

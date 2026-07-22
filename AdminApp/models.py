@@ -156,7 +156,6 @@ class Deal(models.Model):
     priority = models.CharField( max_length=20, choices=PRIORITY_CHOICES, default="Medium" )
     deal_description = models.TextField( blank=True, null=True )
 
-    customer = models.ForeignKey("Customer", on_delete=models.SET_NULL, null=True, blank=True, related_name="deals")
     account = models.ForeignKey("Accounts", on_delete=models.SET_NULL, null=True, blank=True, related_name="deals")
 
     created_at = models.DateTimeField(auto_now_add=True)

@@ -1068,6 +1068,218 @@ def get_lead_to_customer_prefill(request, lead_id):
     }
 
     return JsonResponse(prefilled_data, status=200)
+
+
+
+@api_view(["POST"])
+def convert_lead(request, lead_id):
+    try:
+        lead = Lead.objects.get(
+            id=lead_id,
+            company=request.company
+        )
+    except Lead.DoesNotExist:
+        return HttpResponse("Lead not found", status=404)
+
+    if lead.status == "converted":
+        return HttpResponse("Lead already converted", status=400)
+
+    create_customer = request.data.get("create_customer", False)
+    create_account = request.data.get("create_account", False)
+    create_deal = request.data.get("create_deal", False)
+
+    customer = None
+    account = None
+    deal = None
+
+    # ----------------------------
+    # CUSTOMER
+    # ----------------------------
+
+    if create_customer:
+
+        customer = Customer.objects.filter(
+            lead=lead,
+            company=request.company
+        ).first()
+
+        if customer is None:
+            customer = Customer.objects.create(
+                company=request.company,
+                lead=lead,
+
+                company_name=request.data.get(
+                    "company_name",
+                    lead.company_name,
+                ),
+
+                contact_name=request.data.get(
+                    "contact_name",
+                    lead.full_name,
+                ),
+
+                phone_number=request.data.get(
+                    "phone_number",
+                    lead.phone_number,
+                ),
+
+                email=request.data.get(
+                    "email",
+                    lead.email,
+                ),
+
+                industry=request.data.get(
+                    "industry",
+                    "",
+                ),
+            )
+
+    # ----------------------------
+    # ACCOUNT
+    # ----------------------------
+
+    if create_account:
+
+        account = Accounts.objects.filter(
+            company=request.company,
+            account_name=lead.company_name,
+        ).first()
+
+        if account is None:
+            account = Accounts.objects.create(
+                company=request.company,
+
+                account_name=request.data.get(
+                    "company_name",
+                    lead.company_name,
+                ),
+
+                assigned_to=lead.assigned_to,
+
+                phone_number=request.data.get(
+                    "phone_number",
+                    lead.phone_number,
+                ),
+
+                website=request.data.get(
+                    "website",
+                    "",
+                ),
+
+                industry=request.data.get(
+                    "industry",
+                    "",
+                ),
+            )
+
+    # ----------------------------
+    # DEAL
+    # ----------------------------
+
+    if create_deal:
+
+        # Create customer automatically
+        if customer is None:
+
+            customer = Customer.objects.create(
+                company=request.company,
+                lead=lead,
+
+                company_name=lead.company_name,
+                contact_name=lead.full_name,
+                phone_number=lead.phone_number,
+                email=lead.email,
+                industry="",
+            )
+
+
+        # Create account automatically
+        if account is None:
+
+            account = Accounts.objects.create(
+                company=request.company,
+
+                account_name=lead.company_name,
+
+                assigned_to=lead.assigned_to,
+
+                phone_number=lead.phone_number,
+
+                website="",
+
+                industry="",
+            )
+
+
+        deal = Deal.objects.create(
+
+            company=request.company,
+
+            customer=customer,
+
+            account=account,
+
+            lead=lead,
+
+
+            deal_name=request.data.get(
+                "deal_name",
+                f"{lead.company_name} Deal"
+            ),
+
+
+            company_name=lead.company_name,
+
+
+            deal_amount=request.data.get(
+                "deal_amount",
+                0
+            ),
+
+
+            stage=request.data.get(
+                "stage",
+                "Discussion"
+            ),
+
+
+            assigned_to=lead.assigned_to,
+
+
+            expected_close_date=request.data.get(
+                "expected_close_date"
+            ),
+
+
+            deal_source=lead.lead_source,
+
+
+            priority=lead.priority,
+
+
+            deal_description=lead.lead_description,
+
+        )
+    # ----------------------------
+    # UPDATE LEAD
+    # ----------------------------
+
+    lead.status = "converted"
+    lead.converted_at = timezone.now()
+    lead.save()
+
+    return JsonResponse({
+        "message": "Lead converted successfully",
+
+        "customer_id": customer.id if customer else None,
+
+        "account_id": account.id if account else None,
+
+        "deal_id": deal.id if deal else None,
+    })
+
+
+    
 # ............ unconverted lead show in dropdown ........
 @api_view(['GET'])
 def get_unconverted_leads(request):
@@ -1101,10 +1313,15 @@ def get_linkable_deals(request):
 # ......... view total leads ...........
 @api_view(['GET'])
 def leads_by_source(request):
-    from django.db.models import Count
-    sources = Lead.objects.values('lead_source').annotate(count=Count('id'), company=request.company)
-    total = Lead.objects.count()
-    
+    sources = (
+        Lead.objects
+        .filter(company=request.company)
+        .values("lead_source")
+        .annotate(count=Count("id"))
+    )
+
+    total = Lead.objects.filter(company=request.company).count()
+
     colors = {
         "Website": "#3B82F6",
         "WhatsApp": "#10B981",
@@ -1116,15 +1333,17 @@ def leads_by_source(request):
 
     data = [
         {
-            "name": s['lead_source'],
-            "value": round((s['count'] / total) * 100) if total > 0 else 0,
-            "color": colors.get(s['lead_source'], "#64748B"),
+            "name": source["lead_source"],
+            "value": round((source["count"] / total) * 100) if total else 0,
+            "color": colors.get(source["lead_source"], "#64748B"),
         }
-        for s in sources
+        for source in sources
     ]
 
-    return JsonResponse({"data": data, "total": total})
-
+    return JsonResponse({
+        "data": data,
+        "total": total,
+    })
 
 
 # .......... Add, Edit, View, Delete the choices ...........
