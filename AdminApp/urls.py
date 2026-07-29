@@ -53,6 +53,7 @@ urlpatterns= [
 
     path('account/add/', views.add_account, name='acc-add'),
     path('account/view/', views.view_accounts, name='view-acc'),
+    path('account/single/view/<int:id>/', views.view_single_account, name='account-single'),
     path('account/update/<int:id>/', views.update_account, name='update-acc'),
     path('account/delete/<int:id>/', views.delete_account, name='delete-acc'),
 

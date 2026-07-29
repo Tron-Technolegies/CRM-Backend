@@ -20,6 +20,8 @@ from django.views.decorators.csrf import csrf_exempt
 from django.conf import settings
 from django.core.mail import send_mail
 
+from django.db.models import Q
+
 
 # .............. authentication..............
 @api_view(["POST"])
@@ -426,6 +428,60 @@ def delete_lead(request, id):
 
 # ...............deal....................
 # ............ add lead id in add deal ..............
+from .models import Deal, Lead, Customer, Staff
+from .models import Accounts  # adjust import path/name to match your app
+
+
+def serialize_deal(deal):
+    related = None
+    if deal.customer_id:
+        related = {
+            "type": "customer",
+            "id": deal.customer_id,
+            "name": deal.customer.contact_name or deal.customer.company_name,
+        }
+    elif deal.account_id:
+        related = {
+            "type": "account",
+            "id": deal.account_id,
+            "name": deal.account.account_name,
+        }
+
+    return {
+        "id": deal.id,
+        "name": deal.deal_name,
+        "company_name": deal.company_name,
+        "stage": deal.stage,
+        "value": float(deal.deal_amount) if deal.deal_amount else 0,
+        "expectedCloseDate": str(deal.expected_close_date) if deal.expected_close_date else "—",
+        "assignedTo": deal.assigned_to.full_name if deal.assigned_to else "—",
+        "assignedToId": deal.assigned_to.id if deal.assigned_to else None,
+        "source": deal.deal_source,
+        "priority": deal.priority,
+        "description": deal.deal_description,
+        "createdAt": deal.created_at.isoformat() if deal.created_at else None,
+        "relatedTo": related,
+    }
+
+
+def _resolve_related(request, related_type, related_id):
+    """Returns (customer, account, error_message)."""
+    if related_type == "customer" and related_id:
+        customer = Customer.objects.filter(id=related_id, company=request.company).first()
+        if not customer:
+            return None, None, "Customer not found"
+        return customer, None, None
+
+    if related_type == "account" and related_id:
+        account = Accounts.objects.filter(id=related_id, company=request.company).first()
+        if not account:
+            return None, None, "Account not found"
+        return None, account, None
+
+    # empty/"none"/None → clear both
+    return None, None, None
+
+
 @api_view(['POST'])
 def add_deal(request):
     deal_name = request.data.get("deal_name")
@@ -437,7 +493,9 @@ def add_deal(request):
     deal_source = request.data.get("deal_source")
     priority = request.data.get("priority")
     deal_description = request.data.get("deal_description")
-    lead_id = request.data.get("lead_id")          # ← optional lead link
+
+    related_type = request.data.get("related_type")
+    related_id = request.data.get("related_id")
 
     if not deal_name or not company_name:
         return HttpResponse(
@@ -445,13 +503,15 @@ def add_deal(request):
             status=400
         )
 
-    # fetch lead if lead_id is provided
-    lead = None
-    if lead_id:
-        try:
-            lead = Lead.objects.get(id=lead_id)
-        except Lead.DoesNotExist:
-            return HttpResponse("Lead not found", status=404)
+    if related_type not in ("customer", "account") or not related_id:
+        return HttpResponse(
+            "A deal must be linked to a Customer or an Account",
+            status=400
+        )
+
+    customer, account, err = _resolve_related(request, related_type, related_id)
+    if err:
+        return HttpResponse(err, status=404)
 
     try:
         Deal.objects.create(
@@ -465,67 +525,34 @@ def add_deal(request):
             deal_source=deal_source,
             priority=priority,
             deal_description=deal_description,
-            lead=lead,                              # 🔗 link lead if provided
+            customer=customer,
+            account=account,
         )
-
-        # mark lead as converted if linked
-        if lead:
-            lead.status = "converted"
-            lead.converted_at = timezone.now()
-            lead.save()
 
         return HttpResponse("Deal created successfully", status=201)
 
     except Exception as e:
         return HttpResponse(str(e), status=500)
-    
 
 
 @api_view(['GET'])
 def view_deals(request):
-    deals = Deal.objects.filter(company=request.company).order_by('-updated_at')
-    list = []
-
-    for i in deals:
-        list.append({
-            "c_name": i.company.name,
-            "id": i.id,
-            "name": i.deal_name,
-            "company_name": i.company_name,
-            "stage": i.stage,
-            "value": float(i.deal_amount) if i.deal_amount else 0,
-            "expectedCloseDate": str(i.expected_close_date) if i.expected_close_date else "—",
-            "assignedTo": i.assigned_to.full_name if i.assigned_to else "—",
-            "assignedToId": i.assigned_to.id if i.assigned_to else None,
-            "source": i.deal_source,
-            "priority": i.priority,
-            "description": i.deal_description,
-            "createdAt": i.created_at.isoformat() if i.created_at else None,
-        })
-    return JsonResponse(list, safe=False)
-
+    deals = (
+        Deal.objects
+        .filter(company=request.company)
+        .select_related('assigned_to', 'customer', 'account')
+        .order_by('-updated_at')
+    )
+    return JsonResponse([serialize_deal(d) for d in deals], safe=False)
 
 
 @api_view(['GET'])
 def view_single_deals(request, id):
-    deal = get_object_or_404(Deal, id=id, company=request.company)
-
-    data = {
-                "id": deal.id,
-                "name": deal.deal_name,
-                "company_name": deal.company_name,
-                "stage": deal.stage,
-                "value": float(deal.deal_amount) if deal.deal_amount else 0,
-                "expectedCloseDate": str(deal.expected_close_date) if deal.expected_close_date else "—",
-                "assignedTo": deal.assigned_to.full_name if deal.assigned_to else "—",
-                "assignedToId": deal.assigned_to.id if deal.assigned_to else None,
-                "source": deal.deal_source,
-                "priority": deal.priority,
-                "description": deal.deal_description,
-                "createdAt": deal.created_at.isoformat() if deal.created_at else None,
-            }
-    return JsonResponse(data, safe=False)
-
+    deal = get_object_or_404(
+        Deal.objects.select_related('assigned_to', 'customer', 'account'),
+        id=id, company=request.company
+    )
+    return JsonResponse(serialize_deal(deal), safe=False)
 
 
 @api_view(['PUT'])
@@ -533,7 +560,7 @@ def update_deal(request, id):
     try:
         deal = Deal.objects.get(id=id, company=request.company)
     except Deal.DoesNotExist:
-        return HttpResponse("Dead not found", status=404)
+        return HttpResponse("Deal not found", status=404)
 
     deal.deal_name = request.data.get("deal_name") or deal.deal_name
     deal.company_name = request.data.get("company_name") or deal.company_name
@@ -550,18 +577,34 @@ def update_deal(request, id):
     else:
         deal.assigned_to = None
 
+    if "related_type" in request.data:
+        related_type = request.data.get("related_type")
+        related_id = request.data.get("related_id")
+
+        if related_type not in ("customer", "account") or not related_id:
+            return HttpResponse(
+                "A deal must be linked to a Customer or an Account",
+                status=400
+            )
+
+        customer, account, err = _resolve_related(request, related_type, related_id)
+        if err:
+            return HttpResponse(err, status=404)
+
+        deal.customer = customer
+        deal.account = account
+
     try:
         deal.save()
         return HttpResponse("Deal updated successfully", status=200)
     except Exception as e:
         return HttpResponse(str(e), status=500)
-    
 
 
 @api_view(['DELETE'])
 def delete_deal(request, id):
-    data = Deal.objects.get(id=id, company=request.company)
-    data.delete()
+    deal = get_object_or_404(Deal, id=id, company=request.company)
+    deal.delete()
     return JsonResponse({"message": "successfully deleted"})
 
 
@@ -580,7 +623,7 @@ def add_customer(request):
     deal_id = request.data.get("deal_id")
     lead_id = request.data.get("lead_id")   # ← new: optional lead link
 
-    if not company_name or not contact_name or not phone_number:
+    if not contact_name or not phone_number or not email:
         return HttpResponse(
             "Company name, contact name and phone number are mandatory fields",
             status=400
@@ -714,15 +757,19 @@ def add_task(request):
     title = request.data.get("title")
     description = request.data.get("description")
     assigned_to = request.data.get("assigned_to")
-    related_to = request.data.get("related_to")
     priority = request.data.get("priority")
     status = request.data.get("status")
     due_date = request.data.get("due_date")
 
+    related_type = request.data.get("related_type", "none")
+    related_lead_id = request.data.get("related_lead")
+    related_contact_id = request.data.get("related_contact")
+    related_deal_id = request.data.get("related_deal")
+    related_account_id = request.data.get("related_account")
+
     if not title or not due_date:
         return HttpResponse("Title and due_date are mandatory fields", status=400)
 
-    # normalize status
     status_map = {
         "pending": "pending",
         "in progress": "in_progress",
@@ -731,37 +778,71 @@ def add_task(request):
     }
     status = status_map.get(status.lower() if status else "pending", "pending")
 
+    staff = None
+    if assigned_to:
+        try:
+            staff = Staff.objects.get(id=assigned_to, company=request.company)
+        except Staff.DoesNotExist:
+            return HttpResponse("Invalid staff", status=400)
+
+    lead = contact = deal = account = None
+    try:
+        if related_type == "lead" and related_lead_id:
+            lead = Lead.objects.get(id=related_lead_id, company=request.company)
+        elif related_type == "contact" and related_contact_id:
+            contact = Customer.objects.get(id=related_contact_id, company=request.company)
+        elif related_type == "deal" and related_deal_id:
+            deal = Deal.objects.get(id=related_deal_id, company=request.company)
+        elif related_type == "account" and related_account_id:
+            account = Accounts.objects.get(id=related_account_id, company=request.company)
+    except (Lead.DoesNotExist, Customer.DoesNotExist, Deal.DoesNotExist, Accounts.DoesNotExist):
+        return HttpResponse("Invalid related record", status=400)
+
     try:
         Task.objects.create(
             company=request.company,
             title=title,
             description=description,
-            assigned_to=None,
-            related_to=related_to,
+            assigned_to=staff,
+            lead=lead,
+            contact=contact,
+            deal=deal,
+            account=account,
             priority=priority,
             status=status,
             due_date=due_date,
         )
         return HttpResponse("Task created successfully", status=201)
-
     except Exception as e:
         return HttpResponse(str(e), status=500)
-    
 
 
 @api_view(['GET'])
 def view_tasks(request):
-    tasks = Task.objects.filter(company=request.company)
+    tasks = Task.objects.filter(company=request.company).select_related(
+        "assigned_to", "lead", "contact", "deal", "account"
+    )
     data = []
 
     for i in tasks:
+        related_type = "lead" if i.lead else "contact" if i.contact else "deal" if i.deal else "account" if i.account else "none"
+        related_name = (
+            i.lead.full_name if i.lead else
+            i.contact.company_name if i.contact else
+            i.deal.deal_name if i.deal else
+            i.account.account_name if i.account else "—"
+        )
+        related_id = i.lead_id or i.contact_id or i.deal_id or i.account_id
+
         data.append({
             "id": i.id,
             "title": i.title,
             "description": i.description,
             "assignedTo": i.assigned_to.full_name if i.assigned_to else "—",
             "assignedToId": i.assigned_to.id if i.assigned_to else None,
-            "relatedTo": i.related_to,
+            "relatedType": related_type,
+            "relatedTo": related_name,
+            "relatedToId": related_id,
             "priority": i.priority,
             "status": i.status,
             "dueDate": str(i.due_date) if i.due_date else None,
@@ -771,62 +852,115 @@ def view_tasks(request):
     return JsonResponse(data, safe=False)
 
 
-
 @api_view(['GET'])
 def view_single_task(request, id):
-    task = get_object_or_404(Task, id=id, company=request.company)
+    task = get_object_or_404(
+        Task.objects.select_related("assigned_to", "lead", "contact", "deal", "account"),
+        id=id, company=request.company
+    )
+
+    related_type = "lead" if task.lead else "contact" if task.contact else "deal" if task.deal else "account" if task.account else "none"
+    related_name = (
+        task.lead.full_name if task.lead else
+        task.contact.company_name if task.contact else
+        task.deal.deal_name if task.deal else
+        task.account.account_name if task.account else "—"
+    )
+    related_id = task.lead_id or task.contact_id or task.deal_id or task.account_id
 
     data = {
-                "id": task.id,
-                "title": task.title,
-                "description": task.description,
-                "assignedTo": task.assigned_to.full_name if task.assigned_to else "—",
-                "assignedToId": task.assigned_to.id if task.assigned_to else None,
-                "relatedTo": task.related_to,
-                "priority": task.priority,
-                "status": task.status,
-                "dueDate": str(task.due_date) if task.due_date else None,
-                "createdAt": task.created_at.isoformat() if task.created_at else None,
-            }
+        "id": task.id,
+        "title": task.title,
+        "description": task.description,
+        "assignedTo": task.assigned_to.full_name if task.assigned_to else "—",
+        "assignedToId": task.assigned_to.id if task.assigned_to else None,
+        "relatedType": related_type,
+        "relatedTo": related_name,
+        "relatedToId": related_id,
+        "priority": task.priority,
+        "status": task.status,
+        "dueDate": str(task.due_date) if task.due_date else None,
+        "createdAt": task.created_at.isoformat() if task.created_at else None,
+    }
 
     return JsonResponse(data, safe=False)
-
 
 
 @api_view(['PUT'])
 def update_task(request, id):
     try:
         task = Task.objects.get(id=id, company=request.company)
-
     except Task.DoesNotExist:
         return HttpResponse("Task not found", status=404)
 
-    task.title = request.data.get("title") or task.title
-    task.description = request.data.get("description") or task.description
-    task.related_to = request.data.get("related_to") or task.related_to
-    task.priority = request.data.get("priority") or task.priority
-    task.status = request.data.get("status") or task.status
-    task.due_date = request.data.get("due_date") or task.due_date
+    if "title" in request.data:
+        task.title = request.data.get("title")
+    if "description" in request.data:
+        task.description = request.data.get("description")
+    if "priority" in request.data:
+        task.priority = request.data.get("priority")
+    if "due_date" in request.data:
+        task.due_date = request.data.get("due_date")
 
-    assigned_to_id = request.data.get("assigned_to")
-    if assigned_to_id:
-        task.assigned_to = get_object_or_404(Staff, id=assigned_to_id)
-    else:
-        task.assigned_to = None
+    if "status" in request.data:
+        status_map = {
+            "pending": "pending",
+            "in progress": "in_progress",
+            "in_progress": "in_progress",
+            "completed": "completed",
+        }
+        raw_status = request.data.get("status")
+        task.status = status_map.get(raw_status.lower() if raw_status else "", task.status)
+
+    if "assigned_to" in request.data:
+        assigned_to_id = request.data.get("assigned_to")
+        if assigned_to_id:
+            try:
+                task.assigned_to = Staff.objects.get(id=assigned_to_id, company=request.company)
+            except Staff.DoesNotExist:
+                return HttpResponse("Invalid staff", status=400)
+        else:
+            task.assigned_to = None
+
+    if "related_type" in request.data:
+        related_type = request.data.get("related_type")
+        task.lead = None
+        task.contact = None
+        task.deal = None
+        task.account = None
+
+        try:
+            if related_type == "lead":
+                lead_id = request.data.get("related_lead")
+                task.lead = Lead.objects.get(id=lead_id, company=request.company) if lead_id else None
+            elif related_type == "contact":
+                contact_id = request.data.get("related_contact")
+                task.contact = Customer.objects.get(id=contact_id, company=request.company) if contact_id else None
+            elif related_type == "deal":
+                deal_id = request.data.get("related_deal")
+                task.deal = Deal.objects.get(id=deal_id, company=request.company) if deal_id else None
+            elif related_type == "account":
+                account_id = request.data.get("related_account")
+                task.account = Accounts.objects.get(id=account_id, company=request.company) if account_id else None
+        except (Lead.DoesNotExist, Customer.DoesNotExist, Deal.DoesNotExist, Accounts.DoesNotExist):
+            return HttpResponse("Invalid related record", status=400)
 
     try:
         task.save()
         return HttpResponse("Task updated successfully", status=200)
     except Exception as e:
         return HttpResponse(str(e), status=500)
-    
 
 
 @api_view(['DELETE'])
 def delete_task(request, id):
+    try:
         task = Task.objects.get(id=id, company=request.company)
-        task.delete()
-        return JsonResponse({"message": "Task deleted successfully"})
+    except Task.DoesNotExist:
+        return HttpResponse("Task not found", status=404)
+
+    task.delete()
+    return JsonResponse({"message": "Task deleted successfully"})
 
 
 
@@ -1134,7 +1268,7 @@ def convert_lead(request, lead_id):
 
                 industry=request.data.get(
                     "industry",
-                    "",
+                    lead.industry,
                 ),
             )
 
@@ -1182,88 +1316,54 @@ def convert_lead(request, lead_id):
 
     if create_deal:
 
-        # Create customer automatically
-        if customer is None:
+        related_type = request.data.get("related_type")
 
-            customer = Customer.objects.create(
+        if related_type == "customer":
+
+            if customer is None:
+                customer = Customer.objects.create(
+                    company=request.company,
+                    lead=lead,
+                    company_name=lead.company_name,
+                    contact_name=lead.full_name,
+                    phone_number=lead.phone_number,
+                    email=lead.email,
+                    industry="",
+                )
+
+            deal = Deal.objects.create(
                 company=request.company,
+                customer=customer,
+                account=None,
                 lead=lead,
-
-                company_name=lead.company_name,
-                contact_name=lead.full_name,
-                phone_number=lead.phone_number,
-                email=lead.email,
-                industry="",
+                deal_name=request.data.get(
+                    "deal_name",
+                    f"{lead.company_name} Deal"
+                ),
             )
 
+        elif related_type == "account":
 
-        # Create account automatically
-        if account is None:
+            if account is None:
+                account = Accounts.objects.create(
+                    company=request.company,
+                    account_name=lead.company_name,
+                    assigned_to=lead.assigned_to,
+                    phone_number=lead.phone_number,
+                    website="",
+                    industry="",
+                )
 
-            account = Accounts.objects.create(
+            deal = Deal.objects.create(
                 company=request.company,
-
-                account_name=lead.company_name,
-
-                assigned_to=lead.assigned_to,
-
-                phone_number=lead.phone_number,
-
-                website="",
-
-                industry="",
+                customer=None,
+                account=account,
+                lead=lead,
+                deal_name=request.data.get(
+                    "deal_name",
+                    f"{lead.company_name} Deal"
+                ),
             )
-
-
-        deal = Deal.objects.create(
-
-            company=request.company,
-
-            customer=customer,
-
-            account=account,
-
-            lead=lead,
-
-
-            deal_name=request.data.get(
-                "deal_name",
-                f"{lead.company_name} Deal"
-            ),
-
-
-            company_name=lead.company_name,
-
-
-            deal_amount=request.data.get(
-                "deal_amount",
-                0
-            ),
-
-
-            stage=request.data.get(
-                "stage",
-                "Discussion"
-            ),
-
-
-            assigned_to=lead.assigned_to,
-
-
-            expected_close_date=request.data.get(
-                "expected_close_date"
-            ),
-
-
-            deal_source=lead.lead_source,
-
-
-            priority=lead.priority,
-
-
-            deal_description=lead.lead_description,
-
-        )
     # ----------------------------
     # UPDATE LEAD
     # ----------------------------
@@ -1355,57 +1455,69 @@ def leads_by_source(request):
 @api_view(['GET'])
 def view_picklists(request):
     field = request.GET.get("field")
-    qs = PicklistOption.objects.filter(company=request.company, is_active=True)
+ 
+    qs = PicklistOption.objects.filter(
+        Q(company=request.company) | Q(company__isnull=True),
+        is_active=True,
+    )
+ 
     if field:
         qs = qs.filter(field=field)
-    data = [{"id": o.id, "field": o.field, "value": o.value, "label": o.label, "order": o.order} for o in qs]
+ 
+    data = [
+        {"id": o.id, "field": o.field, "value": o.value, "label": o.label, "order": o.order}
+        for o in qs
+    ]
     return JsonResponse(data, safe=False)
-
-
+ 
+ 
 @api_view(['POST'])
 def add_picklist_option(request):
     field = request.data.get("field")
     value = request.data.get("value")
     label = request.data.get("label")
-
+ 
     if not field or not value or not label:
         return HttpResponse("field, value and label are required", status=400)
-
-    if PicklistOption.objects.filter(field=field, value=value).exists():
+ 
+    exists = PicklistOption.objects.filter(
+        Q(company=request.company) | Q(company__isnull=True),
+        field=field,
+        value=value,
+    ).exists()
+ 
+    if exists:
         return HttpResponse("This option already exists", status=400)
-
-    max_order = PicklistOption.objects.filter(field=field).count()
+ 
+    max_order = PicklistOption.objects.filter(company=request.company, field=field).count()
     PicklistOption.objects.create(company=request.company, field=field, value=value, label=label, order=max_order)
     return HttpResponse("Option added successfully", status=201)
-
-
+ 
+ 
 @api_view(['PUT'])
 def update_picklist_option(request, id):
     try:
         option = PicklistOption.objects.get(id=id, company=request.company)
     except PicklistOption.DoesNotExist:
         return HttpResponse("Option not found", status=404)
-
+ 
     option.label = request.data.get("label") or option.label
     option.is_active = request.data.get("is_active", option.is_active)
     option.save()
     return HttpResponse("Option updated successfully", status=200)
-
-
+ 
+ 
 @api_view(['DELETE'])
 def delete_picklist_option(request, id):
     try:
-        option = PicklistOption.objects.get(id=id)
+        option = PicklistOption.objects.get(id=id, company=request.company)
         option.delete()
         return JsonResponse({"message": "Option deleted successfully"})
     except PicklistOption.DoesNotExist:
         return HttpResponse("Option not found", status=404)
-    
-
 
 # .............. account ................
 
-@csrf_exempt
 @api_view(['POST'])
 def add_account(request):
     account_name = request.data.get("acc_name")
@@ -1469,10 +1581,9 @@ def add_account(request):
         return HttpResponse(str(e), status=500)
     
 
-@csrf_exempt
 @api_view(['GET'])
 def view_accounts(request):
-    accounts = Accounts.objects.select_related(
+    accounts = Accounts.objects.filter(company=request.company).select_related(
         "billing_address", "shipping_address", "assigned_to", "parent_account"
     ).all()
 
@@ -1518,9 +1629,55 @@ def view_accounts(request):
     return JsonResponse(data, safe=False)
 
 
+@api_view(['GET'])
+def view_single_account(request, id):
+    account = get_object_or_404(
+        Accounts.objects.select_related("billing_address", "shipping_address", "assigned_to", "parent_account"),
+        id=id, company=request.company
+    )
 
-@csrf_exempt
-@api_view(['POST'])
+    data = {
+        "id": account.id,
+        "account_name": account.account_name,
+        "assigned_to": account.assigned_to.id if account.assigned_to else None,
+        "assigned_to_name": str(account.assigned_to) if account.assigned_to else None,
+        "phone_number": account.phone_number,
+        "account_site": account.account_site,
+        "parent_account": account.parent_account.id if account.parent_account else None,
+        "website": account.website,
+        "account_type": account.account_type,
+        "industry": account.industry,
+        "ownership": account.ownership,
+        "employees": account.employees,
+
+        "billing_address": {
+            "id": account.billing_address.id,
+            "country": account.billing_address.country,
+            "address": account.billing_address.address,
+            "street_address": account.billing_address.street_address,
+            "city": account.billing_address.city,
+            "state": account.billing_address.state,
+            "zip_code": account.billing_address.zip_code,
+        } if account.billing_address else None,
+
+        "shipping_address": {
+            "id": account.shipping_address.id,
+            "country": account.shipping_address.country,
+            "address": account.shipping_address.address,
+            "street_address": account.shipping_address.street_address,
+            "city": account.shipping_address.city,
+            "state": account.shipping_address.state,
+            "zip_code": account.shipping_address.zip_code,
+        } if account.shipping_address else None,
+
+        "created_at": account.created_at.isoformat(),
+        "updated_at": account.updated_at.isoformat(),
+    }
+
+    return JsonResponse(data, safe=False)
+
+
+@api_view(['PUT'])
 def update_account(request, id):
     try:
         account = Accounts.objects.get(id=id, company=request.company)
@@ -1545,7 +1702,6 @@ def update_account(request, id):
         if parent_account_id:
             account.parent_account_id = parent_account_id
 
-
         billing_data = request.data.get("billing_add")
         if billing_data:
             if account.billing_address:
@@ -1566,7 +1722,6 @@ def update_account(request, id):
                     zip_code=billing_data.get("zip_code", ""),
                 )
                 account.billing_address = billing_address
-
 
         shipping_data = request.data.get("shipping_add")
         if shipping_data:
@@ -1915,6 +2070,7 @@ def add_meeting(request):
     related_type = request.data.get("related_type", "none")
     related_lead_id = request.data.get("related_lead")
     related_customer_id = request.data.get("related_customer")
+    related_account_id = request.data.get("related_account")
     repeat = request.data.get("repeat", "none")
 
     if not title or not from_datetime or not to_datetime:
@@ -1934,6 +2090,7 @@ def add_meeting(request):
             related_type=related_type,
             related_lead_id=related_lead_id if related_type == "lead" else None,
             related_customer_id=related_customer_id if related_type == "customer" else None,
+            related_account_id=related_account_id if related_type == "account" else None,
             repeat=repeat,
         )
 
@@ -1951,7 +2108,7 @@ def add_meeting(request):
 def view_meetings(request):
     meetings = (
         Meeting.objects.filter(company=request.company)
-        .select_related( "host", "related_lead", "related_customer")
+        .select_related("host", "related_lead", "related_customer", "related_account")
         .prefetch_related("participants")
         .order_by("-created_at")
     )
@@ -1973,6 +2130,7 @@ def view_meetings(request):
             "relatedType": m.related_type,
             "relatedLead": {"id": m.related_lead.id, "name": m.related_lead.full_name} if m.related_lead else None,
             "relatedCustomer": {"id": m.related_customer.id, "name": m.related_customer.company_name} if m.related_customer else None,
+            "relatedAccount": {"id": m.related_account.id, "name": m.related_account.account_name} if m.related_account else None,
             "repeat": m.repeat,
             "createdAt": m.created_at.isoformat(),
         })
@@ -1983,7 +2141,9 @@ def view_meetings(request):
 @api_view(['GET'])
 def view_single_meeting(request, id):
     meeting = get_object_or_404(
-        Meeting.objects.select_related("host", "related_lead", "related_customer").prefetch_related("participants"),
+        Meeting.objects.select_related(
+            "host", "related_lead", "related_customer", "related_account"
+        ).prefetch_related("participants"),
         id=id, company=request.company
     )
 
@@ -2002,6 +2162,7 @@ def view_single_meeting(request, id):
         "relatedType": meeting.related_type,
         "relatedLead": {"id": meeting.related_lead.id, "name": meeting.related_lead.full_name} if meeting.related_lead else None,
         "relatedCustomer": {"id": meeting.related_customer.id, "name": meeting.related_customer.company_name} if meeting.related_customer else None,
+        "relatedAccount": {"id": meeting.related_account.id, "name": meeting.related_account.account_name} if meeting.related_account else None,
         "repeat": meeting.repeat,
         "createdAt": meeting.created_at.isoformat(),
     }
@@ -2051,12 +2212,19 @@ def update_meeting(request, id):
             if related_type == "lead":
                 meeting.related_lead_id = request.data.get("related_lead") or None
                 meeting.related_customer = None
+                meeting.related_account = None
             elif related_type == "customer":
                 meeting.related_customer_id = request.data.get("related_customer") or None
                 meeting.related_lead = None
+                meeting.related_account = None
+            elif related_type == "account":
+                meeting.related_account_id = request.data.get("related_account") or None
+                meeting.related_lead = None
+                meeting.related_customer = None
             else:
                 meeting.related_lead = None
                 meeting.related_customer = None
+                meeting.related_account = None
 
         meeting.save()
 
@@ -2078,7 +2246,7 @@ def delete_meeting(request, id):
         meeting.delete()
         return JsonResponse({"message": "Meeting deleted successfully"})
     except Meeting.DoesNotExist:
-        return HttpResponse("Meeting not found", status=404)  
+        return HttpResponse("Meeting not found", status=404)
     
 
 
@@ -2096,6 +2264,7 @@ def add_call(request):
     related_lead_id = request.data.get("related_lead")
     related_contact_id = request.data.get("related_contact")
     related_deal_id = request.data.get("related_deal")
+    related_account_id = request.data.get("related_account")
 
     if not subject or not call_type or not start_time or not duration:
         return HttpResponse("Subject, call_type, start_time and duration are required", status=400)
@@ -2113,6 +2282,7 @@ def add_call(request):
             lead_id=related_lead_id if related_type == "lead" else None,
             contact_id=related_contact_id if related_type == "contact" else None,
             deal_id=related_deal_id if related_type == "deal" else None,
+            account_id=related_account_id if related_type == "account" else None,
         )
 
         return HttpResponse("Call created successfully", status=201)
@@ -2126,9 +2296,7 @@ def add_call(request):
 def view_calls(request):
     calls = (
         Call.objects.filter(company=request.company)
-        .select_related(
-            "assigned_to", "lead", "contact", "deal"
-        )
+        .select_related("assigned_to", "lead", "contact", "deal", "account")
         .order_by("-start_time")
     )
 
@@ -2144,10 +2312,11 @@ def view_calls(request):
             "notes": c.notes,
             "assignedTo": c.assigned_to.full_name if c.assigned_to else "—",
             "assignedToId": c.assigned_to.id if c.assigned_to else None,
-            "relatedType": "lead" if c.lead else "contact" if c.contact else "deal" if c.deal else "none",
+            "relatedType": "lead" if c.lead else "contact" if c.contact else "deal" if c.deal else "account" if c.account else "none",
             "relatedLead": {"id": c.lead.id, "name": c.lead.full_name} if c.lead else None,
             "relatedContact": {"id": c.contact.id, "name": c.contact.company_name} if c.contact else None,
             "relatedDeal": {"id": c.deal.id, "name": c.deal.deal_name} if c.deal else None,
+            "relatedAccount": {"id": c.account.id, "name": c.account.account_name} if c.account else None,
             "createdAt": c.created_at.isoformat(),
         })
 
@@ -2157,7 +2326,7 @@ def view_calls(request):
 @api_view(['GET'])
 def view_single_call(request, id):
     call = get_object_or_404(
-        Call.objects.select_related("assigned_to", "lead", "contact", "deal"),
+        Call.objects.select_related("assigned_to", "lead", "contact", "deal", "account"),
         id=id, company=request.company
     )
 
@@ -2171,10 +2340,11 @@ def view_single_call(request, id):
         "notes": call.notes,
         "assignedTo": call.assigned_to.full_name if call.assigned_to else "—",
         "assignedToId": call.assigned_to.id if call.assigned_to else None,
-        "relatedType": "lead" if call.lead else "contact" if call.contact else "deal" if call.deal else "none",
+        "relatedType": "lead" if call.lead else "contact" if call.contact else "deal" if call.deal else "account" if call.account else "none",
         "relatedLead": {"id": call.lead.id, "name": call.lead.full_name} if call.lead else None,
         "relatedContact": {"id": call.contact.id, "name": call.contact.company_name} if call.contact else None,
         "relatedDeal": {"id": call.deal.id, "name": call.deal.deal_name} if call.deal else None,
+        "relatedAccount": {"id": call.account.id, "name": call.account.account_name} if call.account else None,
         "createdAt": call.created_at.isoformat(),
     }
 
@@ -2213,12 +2383,15 @@ def update_call(request, id):
             call.lead = None
             call.contact = None
             call.deal = None
+            call.account = None
             if related_type == "lead":
                 call.lead_id = request.data.get("related_lead") or None
             elif related_type == "contact":
                 call.contact_id = request.data.get("related_contact") or None
             elif related_type == "deal":
                 call.deal_id = request.data.get("related_deal") or None
+            elif related_type == "account":
+                call.account_id = request.data.get("related_account") or None
 
         call.save()
         return HttpResponse("Call updated successfully", status=200)

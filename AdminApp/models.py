@@ -192,7 +192,7 @@ class PicklistOption(models.Model):
     is_active = models.BooleanField(default=True)
 
     class Meta:
-        unique_together = ("field", "value")
+        unique_together = ("company", "field", "value")
         ordering = ["field", "order"]
 
     def __str__(self):
@@ -480,13 +480,17 @@ class Task(models.Model):
     ]
 
     company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="tasks")
-
     case = models.ForeignKey(Case, on_delete=models.CASCADE, null=True, blank=True)
 
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True, null=True)
     assigned_to = models.ForeignKey( Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="tasks")
-    related_to = models.CharField( max_length=255, blank=True, null=True, help_text="e.g. Deal: Website Redesign")
+
+    lead = models.ForeignKey(Lead, null=True, blank=True, on_delete=models.SET_NULL, related_name="tasks")
+    contact = models.ForeignKey(Customer, null=True, blank=True, on_delete=models.SET_NULL, related_name="tasks")
+    deal = models.ForeignKey(Deal, null=True, blank=True, on_delete=models.SET_NULL, related_name="tasks")
+    account = models.ForeignKey(Accounts, null=True, blank=True, on_delete=models.SET_NULL, related_name="tasks")
+
     priority = models.CharField( max_length=10, choices=PRIORITY_CHOICES)
     status = models.CharField( max_length=20, choices=STATUS_CHOICES, default="pending")
     due_date = models.DateField()
@@ -548,6 +552,7 @@ class Meeting(models.Model):
     related_type = models.CharField(max_length=20, choices=RELATED_TYPE_CHOICES, default="none")
     related_lead = models.ForeignKey(Lead, on_delete=models.SET_NULL, null=True, blank=True, related_name="meetings")
     related_customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name="meetings")
+    related_account = models.ForeignKey(Accounts, on_delete=models.SET_NULL, null=True, blank=True, related_name="meetings")
 
     repeat = models.CharField(max_length=20, choices=REPEAT_CHOICES, default="none")
 
@@ -566,7 +571,7 @@ class Call(models.Model):
     ]
 
     STATUS = [
-        ("scheduled", "Scheduled"),
+        ("follow up", "Follow Up"),
         ("completed", "Completed"),
         ("missed", "Missed"),
         ("cancelled", "Cancelled"),
@@ -588,6 +593,7 @@ class Call(models.Model):
     lead = models.ForeignKey(Lead, null=True, blank=True, on_delete=models.SET_NULL, related_name="calls")
     contact = models.ForeignKey(Customer, null=True, blank=True, on_delete=models.SET_NULL, related_name="calls")
     deal = models.ForeignKey(Deal, null=True, blank=True, on_delete=models.SET_NULL, related_name="calls")
+    account = models.ForeignKey(Accounts, null=True, blank=True, on_delete=models.SET_NULL, related_name="calls")
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
