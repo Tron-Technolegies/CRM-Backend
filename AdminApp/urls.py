@@ -75,6 +75,7 @@ urlpatterns= [
     path('call/update/<int:id>/', views.update_call, name='call-update'),
     path('call/delete/<int:id>/', views.delete_call, name='call-delete'),
 
+    path('vendor/prefill/<int:vendor_id>/', views.get_vendor_prefill, name='vendor-prefill'),
     path('vendor/add/', views.add_vendor, name='vendor-add'),
     path('vendor/view/', views.view_vendors, name='vendor-view'),
     path('vendor/single/view/<int:id>/', views.view_single_vendor, name='vendor-single'),

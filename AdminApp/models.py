@@ -365,7 +365,8 @@ class Quotes(models.Model):
     deal = models.ForeignKey('Deal', on_delete=models.SET_NULL, null=True, blank=True, related_name="quotes")
     contact_name = models.CharField(max_length=255)
     account = models.ForeignKey(Accounts, on_delete=models.SET_NULL, null=True, blank=True, related_name="quotes")
-
+    customer = models.ForeignKey(Customer,on_delete=models.SET_NULL,null=True,blank=True,related_name="quotes",)
+    
     billing_address = models.ForeignKey(Address, on_delete=models.SET_NULL, null=True, blank=True, related_name="quote_billing")
     shipping_address = models.ForeignKey(Address, on_delete=models.SET_NULL, null=True, blank=True, related_name="quote_shipping")
 

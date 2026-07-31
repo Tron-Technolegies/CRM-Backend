@@ -1765,26 +1765,25 @@ def delete_account(request, id):
 # Helper to serialize products
 def _serialize_products(quote):
     products = []
-
     for item in quote.items.all():
         products.append({
-            "product": {
-                "id": item.product.id,
-                "name": item.product.name,
-            },
+            "productId": item.product.id,
+            "product": item.product.name,
+            "description": item.description,
             "quantity": item.quantity,
             "listPrice": float(item.list_price),
+            "amount": float(item.amount),
             "discount": float(item.discount),
             "tax": float(item.tax),
             "lineTotal": float(item.total),
         })
-
     return products
 
 # Helper to serialize addresses
 def _serialize_address(addr):
     if not addr:
         return None
+
     return {
         "country": addr.country,
         "address": addr.address,
@@ -1803,11 +1802,13 @@ def add_quote(request):
     assigned_to_id = request.data.get("assigned_to")
     deal_id = request.data.get("deal_id")
     contact_name = request.data.get("contact_name", "")
+
     account_id = request.data.get("account_id")
+    customer_id = request.data.get("customer_id")
+
     billing_data = request.data.get("billing_add")
     shipping_data = request.data.get("shipping_add")
 
-    # 1. Grab the products array from payload
     products_data = request.data.get("products", [])
 
     if not subject:
@@ -1816,23 +1817,37 @@ def add_quote(request):
     try:
         deal = None
         account = None
+        customer = None
 
         if deal_id:
-            try:
-                deal = Deal.objects.get(id=deal_id)
-            except Deal.DoesNotExist:
-                return HttpResponse("Deal not found", status=404)
+            deal = get_object_or_404(
+                Deal,
+                id=deal_id,
+                company=request.company
+            )
 
+        # Account: explicit account_id wins, otherwise derive from the deal
         if account_id:
-            try:
-                account = Accounts.objects.select_related(
+            account = get_object_or_404(
+                Accounts.objects.select_related(
                     "billing_address",
                     "shipping_address"
-                ).get(id=account_id)
-            except Accounts.DoesNotExist:
-                return HttpResponse("Account not found", status=404)
+                ),
+                id=account_id,
+                company=request.company,
+            )
         elif deal and deal.account_id:
             account = deal.account
+
+        # Customer: same pattern — explicit wins, otherwise derive from the deal
+        if customer_id:
+            customer = get_object_or_404(
+                Customer,
+                id=customer_id,
+                company=request.company,
+            )
+        elif deal and deal.customer_id:
+            customer = deal.customer
 
         with transaction.atomic():
 
@@ -1871,18 +1886,19 @@ def add_quote(request):
                 valid_until=valid_until or None,
                 assigned_to_id=assigned_to_id or None,
                 deal=deal,
-                contact_name=contact_name,
                 account=account,
+                customer=customer,
+                contact_name=contact_name,
                 billing_address=billing_address,
                 shipping_address=shipping_address,
             )
 
-            # Save Quote Products
             for item in products_data:
 
                 product = get_object_or_404(
                     Product,
-                    id=item.get("product")
+                    id=item.get("product"),
+                    company=request.company,
                 )
 
                 quantity = int(item.get("quantity", 1))
@@ -1890,7 +1906,6 @@ def add_quote(request):
                 discount = float(item.get("discount", 0))
                 tax = float(product.tax_percentage)
 
-                # Correct calculation
                 amount = quantity * list_price
                 discounted_amount = amount - discount
                 tax_amount = discounted_amount * tax / 100
@@ -1899,7 +1914,10 @@ def add_quote(request):
                 QuoteProduct.objects.create(
                     quote=quote,
                     product=product,
-                    description=product.description,
+                    description=item.get(
+                        "description",
+                        product.description
+                    ),
                     quantity=quantity,
                     list_price=list_price,
                     amount=amount,
@@ -1909,8 +1927,8 @@ def add_quote(request):
                 )
 
         return HttpResponse(
-            "Quote and line items created successfully",
-            status=201
+            "Quote created successfully",
+            status=201,
         )
 
     except Exception as e:
@@ -1923,40 +1941,43 @@ def add_quote(request):
 def view_quotes(request):
     quotes = (
         Quotes.objects.filter(company=request.company)
-        .prefetch_related("items")
         .select_related(
             "assigned_to",
             "deal",
             "account",
+            "customer",
             "billing_address",
             "shipping_address",
         )
+        .prefetch_related("items__product")
         .order_by("-updated_at")
     )
 
     data = []
-    for i in quotes:
 
-        # Calculate Grand Total
-        grand_total = sum(item.total for item in i.items.all())
+    for quote in quotes:
+        grand_total = sum(item.total for item in quote.items.all())
 
         data.append({
-            "id": i.id,
-            "subject": i.subject,
-            "quoteStage": i.quote_stage,
-            "contactName": i.contact_name,
-            "validUntil": str(i.valid_until) if i.valid_until else None,
-            "quoteOwner": i.assigned_to.full_name if i.assigned_to else "—",
-            "dealName": i.deal.deal_name if i.deal else "—",
-            "accountName": i.account.account_name if i.account else "—",
-            "billingAddress": _serialize_address(i.billing_address),
-            "shippingAddress": _serialize_address(i.shipping_address),
-            "products": _serialize_products(i),
-
-            # Added Grand Total
-            "grandTotal": grand_total,
-
-            "createdAt": i.created_at.isoformat(),
+            "id": quote.id,
+            "subject": quote.subject,
+            "quoteStage": quote.quote_stage,
+            "validUntil": str(quote.valid_until) if quote.valid_until else None,
+            "contactName": quote.contact_name,
+            "assignedToId": quote.assigned_to_id,
+            "quoteOwner": quote.assigned_to.full_name if quote.assigned_to else "",
+            "dealId": quote.deal_id,
+            "dealName": quote.deal.deal_name if quote.deal else "",
+            "accountId": quote.account_id,
+            "accountName": quote.account.account_name if quote.account else "",
+            "customerId": quote.customer_id,
+            "customerName": quote.customer.company_name if quote.customer else "",
+            "billingAddress": _serialize_address(quote.billing_address),
+            "shippingAddress": _serialize_address(quote.shipping_address),
+            "products": _serialize_products(quote),
+            "grandTotal": float(grand_total),
+            "createdAt": quote.created_at.isoformat(),
+            "updatedAt": quote.updated_at.isoformat(),
         })
 
     return JsonResponse(data, safe=False)
@@ -1964,9 +1985,18 @@ def view_quotes(request):
 
 @api_view(['GET'])
 def view_single_quote(request, id):
+
     quote = get_object_or_404(
-        Quotes.objects.select_related("assigned_to", "deal", "account", "billing_address", "shipping_address"),
-        id=id, company=request.company
+        Quotes.objects.select_related(
+            "assigned_to",
+            "deal",
+            "account",
+            "customer",
+            "billing_address",
+            "shipping_address",
+        ).prefetch_related("items__product"),
+        id=id,
+        company=request.company,
     )
 
     data = {
@@ -1975,51 +2005,131 @@ def view_single_quote(request, id):
         "quoteStage": quote.quote_stage,
         "validUntil": str(quote.valid_until) if quote.valid_until else None,
         "contactName": quote.contact_name,
-        "products": _serialize_products(quote), # Exposes itemized items detail arrays out cleanly
+        "assignedToId": quote.assigned_to_id,
+        "dealId": quote.deal_id,
+        "dealName": quote.deal.deal_name if quote.deal else "",
+        "accountId": quote.account_id,
+        "accountName": quote.account.account_name if quote.account else "",
+        "customerId": quote.customer_id,
+        "customerName": quote.customer.company_name if quote.customer else "",
         "billingAddress": _serialize_address(quote.billing_address),
         "shippingAddress": _serialize_address(quote.shipping_address),
+        "products": _serialize_products(quote),
     }
 
-    return JsonResponse(data, safe=False)
-
+    return JsonResponse(data)
 
 @api_view(['PUT'])
 def update_quote(request, id):
-    try:
-        quote = Quotes.objects.get(id=id, company=request.company)
-    except Quotes.DoesNotExist:
-        return HttpResponse("Quote not found", status=404)
+
+    quote = get_object_or_404(
+        Quotes,
+        id=id,
+        company=request.company
+    )
 
     try:
         with transaction.atomic():
-            quote.subject = request.data.get("subject") or quote.subject
-            quote.quote_stage = request.data.get("quote_stage") or quote.quote_stage
-            
-            # Simple metadata overrides
-            if "valid_until" in request.data: quote.valid_until = request.data.get("valid_until")
-            if "assigned_to" in request.data: quote.assigned_to_id = request.data.get("assigned_to")
+
+            quote.subject = request.data.get("subject", quote.subject)
+            quote.quote_stage = request.data.get("quote_stage", quote.quote_stage)
+            quote.valid_until = request.data.get("valid_until") or None
+            quote.contact_name = request.data.get("contact_name", quote.contact_name)
+
+            # Assigned To
+            assigned_to = request.data.get("assigned_to")
+            quote.assigned_to_id = assigned_to if assigned_to else None
+
+            # Deal
+            deal_id = request.data.get("deal_id")
+            if deal_id:
+                quote.deal = get_object_or_404(
+                    Deal,
+                    id=deal_id,
+                    company=request.company
+                )
+            else:
+                quote.deal = None
+
+            # Account: explicit account_id wins, otherwise derive from the deal
+            account_id = request.data.get("account_id")
+            if account_id:
+                quote.account = get_object_or_404(
+                    Accounts,
+                    id=account_id,
+                    company=request.company
+                )
+            elif quote.deal and quote.deal.account_id:
+                quote.account = quote.deal.account
+            else:
+                quote.account = None
+
+            # Customer: explicit customer_id wins, otherwise derive from the deal
+            customer_id = request.data.get("customer_id")
+            if customer_id:
+                quote.customer = get_object_or_404(
+                    Customer,
+                    id=customer_id,
+                    company=request.company
+                )
+            elif quote.deal and quote.deal.customer_id:
+                quote.customer = quote.deal.customer
+            else:
+                quote.customer = None
+
+            # Billing Address
+            billing_data = request.data.get("billing_add")
+            if billing_data:
+                if quote.billing_address:
+                    for key, value in billing_data.items():
+                        setattr(quote.billing_address, key, value)
+                    quote.billing_address.save()
+                else:
+                    quote.billing_address = Address.objects.create(**billing_data)
+
+            # Shipping Address
+            shipping_data = request.data.get("shipping_add")
+            if shipping_data:
+                if quote.shipping_address:
+                    for key, value in shipping_data.items():
+                        setattr(quote.shipping_address, key, value)
+                    quote.shipping_address.save()
+                else:
+                    quote.shipping_address = Address.objects.create(**shipping_data)
 
             quote.save()
 
-            # Dynamic Item Synchronizer Block
             products_data = request.data.get("products")
+
             if products_data is not None:
+
                 quote.items.all().delete()
+
                 for item in products_data:
-                    product = get_object_or_404(Product, id=item.get("product"))
+
+                    product = get_object_or_404(
+                        Product,
+                        id=item.get("product"),
+                        company=request.company,
+                    )
 
                     quantity = int(item.get("quantity", 1))
-                    list_price = product.unit_price
+                    list_price = float(product.unit_price)
                     discount = float(item.get("discount", 0))
                     tax = float(product.tax_percentage)
 
-                    amount = quantity * float(list_price)
-                    total = (amount - discount) + ((amount - discount) * tax / 100)
+                    amount = quantity * list_price
+                    discounted = amount - discount
+                    tax_amount = discounted * tax / 100
+                    total = discounted + tax_amount
 
                     QuoteProduct.objects.create(
                         quote=quote,
                         product=product,
-                        description=item.get("description", product.description),
+                        description=item.get(
+                            "description",
+                            product.description
+                        ),
                         quantity=quantity,
                         list_price=list_price,
                         amount=amount,
@@ -2028,12 +2138,14 @@ def update_quote(request, id):
                         total=total,
                     )
 
-        return HttpResponse("Quote updated successfully", status=200)
+        return HttpResponse(
+            "Quote updated successfully",
+            status=200
+        )
 
     except Exception as e:
+        print("UPDATE QUOTE ERROR:", str(e))
         return HttpResponse(str(e), status=500)
-
-from rest_framework import status
 
 
 @api_view(["DELETE"])
@@ -2413,6 +2525,16 @@ def delete_call(request, id):
 
 
 # .............. vendor ................
+@api_view(['GET'])
+def get_vendor_prefill(request, vendor_id):
+    """Fetch vendor address to prefill purchase order form"""
+    vendor = get_object_or_404(Vendor, id=vendor_id, company=request.company)
+    return JsonResponse({
+        "vendorName": vendor.vendor_name,
+        "billingAddress": _format_address(vendor.address),
+    })
+
+
 @api_view(['POST'])
 def add_vendor(request):
     vendor_name = request.data.get("vendor_name")
@@ -3004,29 +3126,49 @@ def _update_address(existing, data):
 
 @api_view(['GET'])
 def get_quote_prefill(request, quote_id):
-    """Fetch quote data to prefill sales order form"""
     quote = get_object_or_404(
         Quotes.objects.select_related(
-            "assigned_to", "deal", "account",
-            "billing_address", "shipping_address"
-        ),
+            "assigned_to",
+            "deal",
+            "account",
+            "billing_address",
+            "shipping_address",
+        ).prefetch_related("items__product", "items__service"),
         id=quote_id,
-        company=request.company
+        company=request.company,
     )
 
-    # Get quote items if any (via sales orders linked to this quote)
     items = []
+
+    for item in quote.items.all():
+        items.append({
+            "productId": item.product.id if item.product else None,
+            "productName": item.product.name if item.product else "",
+            "serviceId": item.service.id if item.service else None,
+            "serviceName": item.service.name if item.service else "",
+            "description": item.description,
+            "quantity": item.quantity,
+            "listPrice": float(item.list_price),
+            "discount": float(item.discount),
+            "tax": float(item.tax),
+            "amount": float(item.amount),
+            "total": float(item.total),
+        })
 
     return JsonResponse({
         "subject": quote.subject,
         "contactName": quote.contact_name,
-        "accountName": quote.account.account_name if quote.account else "",
+
+        "customerId": quote.customer.id if quote.customer else None,
+        "customerName": quote.customer.company_name if quote.customer else "",
+
         "dealId": quote.deal.id if quote.deal else None,
         "dealName": quote.deal.deal_name if quote.deal else "",
+
         "billingAddress": _format_address(quote.billing_address),
         "shippingAddress": _format_address(quote.shipping_address),
+        "items": items,
     })
-
 
 
 @api_view(['POST'])
