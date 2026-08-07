@@ -113,6 +113,7 @@ urlpatterns= [
     path('invoice/single/view/<int:id>/', views.view_single_invoice, name='invoice-single'),
     path('invoice/update/<int:id>/', views.update_invoice, name='invoice-update'),
     path('invoice/delete/<int:id>/', views.delete_invoice, name='invoice-delete'),
+    path("invoice/<int:pk>/pdf/", views.invoice_pdf, name="invoice-pdf"),
     
     path('invoice/sales-order-prefill/<int:sales_order_id>/', views.get_sales_order_prefill, name='invoice-sales-order-prefill'),
 
@@ -140,4 +141,14 @@ urlpatterns= [
     path('service/update/<int:id>/', views.update_service, name='service-update'),
     path('service/delete/<int:id>/', views.delete_service, name='service-delete'),
 
+    path("profile/view/", views.get_profile, name="profile-view"),
+    path("profile/update/", views.update_profile, name="profile-update"),
+
+    path('preferences/', views.notification_preferences, name='notification_preferences'),
+    path("notifications/", views.get_notifications, name='get_notifications'),
+    path("notifications/unread-count/", views.get_unread_count, name='get_unread_count'),
+    path("notifications/<int:id>/read/", views.mark_notification_read, name='mark_notification_read'),
+    path("notifications/read-all/", views.mark_all_notifications_read, name='mark_all_notifications_read'),
+
+    path('change-password/', views.change_password, name='change_password'),
 ]

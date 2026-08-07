@@ -3,6 +3,7 @@ import uuid
 
 from django.db import models
 from django.contrib.auth.models import User
+from django.conf import settings as django_settings
 
 
 
@@ -28,16 +29,26 @@ class Staff(models.Model):
     ]
 
     company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="staff")
-
-    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="staff", null=True, blank=True,)
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="staff", null=True, blank=True)
 
     full_name = models.CharField(max_length=100)
+    last_name = models.CharField(max_length=100, blank=True, default="")
     email = models.EmailField(unique=True)
     role = models.CharField(max_length=50, choices=ROLE_CHOICES, blank=True, default="")
     department = models.CharField(max_length=100, blank=True, default="")
+    profile_type = models.CharField(max_length=100, blank=True, default="")
 
-    invitation_token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False, null=True, blank=True,)
+    mobile = models.CharField(max_length=20, blank=True, default="")
+    website = models.CharField(max_length=255, blank=True, default="")
+    fax = models.CharField(max_length=50, blank=True, default="")
+    alias = models.CharField(max_length=100, blank=True, default="")
+    date_of_birth = models.DateField(null=True, blank=True)
 
+    address = models.OneToOneField("Address", on_delete=models.SET_NULL, null=True, blank=True, related_name="staff")
+
+    added_by = models.ForeignKey("self", on_delete=models.SET_NULL, null=True, blank=True, related_name="invited_staff")
+
+    invitation_token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False, null=True, blank=True)
     is_invited = models.BooleanField(default=False)
     invited_at = models.DateTimeField(auto_now_add=True)
     is_accepted = models.BooleanField(default=False)
@@ -747,6 +758,7 @@ class Invoice(models.Model):
     subject = models.CharField(max_length=255)
     invoice_number = models.CharField( max_length=50, unique=True)
     customer = models.ForeignKey( Customer, on_delete=models.PROTECT, related_name="invoices")
+    account = models.ForeignKey(Accounts, null=True, blank=True, on_delete=models.SET_NULL, related_name="invoices")
     sales_order = models.ForeignKey( SalesOrder, on_delete=models.SET_NULL, null=True, blank=True, related_name="invoices")
     billing_address = models.OneToOneField( Address, on_delete=models.CASCADE, null=True, blank=True, related_name="invoice_billing")
     shipping_address = models.OneToOneField( Address, on_delete=models.CASCADE, null=True, blank=True, related_name="invoice_shipping")
@@ -885,3 +897,72 @@ class CaseSolution(models.Model):
     created_by = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+
+
+class NotificationPreference(models.Model):
+    company = models.ForeignKey( Company, on_delete=models.CASCADE, related_name='notification_preferences')
+    user = models.OneToOneField( django_settings.AUTH_USER_MODEL, on_delete=models.CASCADE,related_name='notification_preference')
+
+    # Email
+    email_daily_digest = models.BooleanField(default=True)
+    email_new_lead_alerts = models.BooleanField(default=True)
+    email_task_assignments = models.BooleanField(default=True)
+    email_meeting_reminders = models.BooleanField(default=True)
+    email_call_assignments = models.BooleanField(default=True)
+    email_system_updates = models.BooleanField(default=False)
+    email_deal_assignments = models.BooleanField(default=True)
+    email_case_assignments = models.BooleanField(default=True)
+    email_sales_order_updates = models.BooleanField(default=True)
+    email_purchase_order_updates = models.BooleanField(default=True)
+    email_invoice_updates = models.BooleanField(default=True)
+
+    # Push
+    push_high_priority_tasks = models.BooleanField(default=True)
+    push_meeting_reminders = models.BooleanField(default=True)
+
+    # In-App
+    inapp_activity_bell = models.BooleanField(default=True)
+    inapp_toast_alerts = models.BooleanField(default=True)
+
+    # Desktop
+    desktop_notification_sound = models.BooleanField(default=False)
+    desktop_floating_preview = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('company', 'user')
+
+    def __str__(self):
+        return f"NotificationPreference({self.user_id}, company={self.company_id})"
+
+
+class Notification(models.Model):
+    TYPE_CHOICES = [
+        ("new_lead", "New Lead"),
+        ("lead_assigned", "Lead Assigned"),
+        ("deal_assigned", "Deal Assigned"),
+        ("task_assigned", "Task Assigned"),
+        ("task_overdue", "Task Overdue"),
+        ("meeting_reminder", "Meeting Reminder"),
+        ("invoice_created", "Invoice Created"),
+        ("sales_order", "Sales Order"),
+        ("purchase_order", "Purchase Order"),
+        ("case_assigned", "Case Assigned"),
+        ("system_update", "System Update"),
+    ]
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='notifications')
+    user = models.ForeignKey(
+        django_settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='notifications'
+    )
+    notification_type = models.CharField(max_length=30, choices=TYPE_CHOICES)
+    title = models.CharField(max_length=255)
+    message = models.TextField(blank=True)
+    is_read = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']

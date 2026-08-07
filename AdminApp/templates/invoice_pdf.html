@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page {
+    size: A4;
+    margin: 2cm;
+  }
+  body {
+    font-family: 'Helvetica', sans-serif;
+    color: #111827;
+    font-size: 12px;
+  }
+  h1 {
+    font-size: 20px;
+    margin-bottom: 4px;
+  }
+  .muted {
+    color: #6B7280;
+  }
+  .header-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 24px;
+  }
+  .header-table td {
+    vertical-align: top;
+    width: 50%;
+    padding: 0;
+  }
+  table.items {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 20px;
+  }
+  table.items th, table.items td {
+    padding: 8px;
+    border-bottom: 1px solid #E5E7EB;
+    font-size: 11px;
+  }
+  table.items th {
+    text-align: left;
+    background-color: #EFF6FF;
+  }
+  td.num {
+    text-align: right;
+  }
+  table.totals {
+    width: 260px;
+    margin-top: 16px;
+    margin-left: auto;
+    border-collapse: collapse;
+  }
+  table.totals td {
+    padding: 4px 0;
+    font-size: 12px;
+  }
+  table.totals td.label {
+    text-align: left;
+  }
+  table.totals td.value {
+    text-align: right;
+  }
+  table.totals tr.grand td {
+    font-weight: bold;
+    border-top: 1px solid #E5E7EB;
+    padding-top: 8px;
+  }
+  .terms {
+    margin-top: 32px;
+    font-size: 11px;
+    color: #6B7280;
+  }
+</style>
+</head>
+<body>
+  <h1>Invoice {{ invoice.invoice_number }}</h1>
+  <div class="muted">{{ invoice.subject }}</div>
+
+  <table class="header-table">
+    <tr>
+      <td>
+        <strong>Billed To</strong><br/>
+        {{ invoice.customer_name }}<br/>
+        {{ billing.address }}<br/>
+        {{ billing.city }}, {{ billing.state }} {{ billing.zip_code }}<br/>
+        {{ billing.country }}
+      </td>
+      <td>
+        <strong>Invoice Date:</strong> {{ invoice.invoice_date }}<br/>
+        <strong>Due Date:</strong> {{ invoice.due_date }}<br/>
+        <strong>Status:</strong> {{ invoice.status }}<br/>
+        <strong>PO Number:</strong> {{ invoice.purchase_order_number }}
+      </td>
+    </tr>
+  </table>
+
+  <table class="items">
+    <thead>
+      <tr>
+        <th>Product</th>
+        <th class="num">Qty</th>
+        <th class="num">Price</th>
+        <th class="num">Discount</th>
+        <th class="num">Tax</th>
+        <th class="num">Total</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in items %}
+      <tr>
+        <td>{{ item.product_name }}</td>
+        <td class="num">{{ item.quantity }}</td>
+        <td class="num">{{ item.list_price }}</td>
+        <td class="num">{{ item.discount }}</td>
+        <td class="num">{{ item.tax }}</td>
+        <td class="num">{{ item.line_total }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <table class="totals">
+    <tr>
+      <td class="label">Sub Total</td>
+      <td class="value">{{ totals.sub_total }}</td>
+    </tr>
+    <tr>
+      <td class="label">Discount</td>
+      <td class="value">{{ totals.discount_total }}</td>
+    </tr>
+    <tr>
+      <td class="label">Tax</td>
+      <td class="value">{{ totals.tax_total }}</td>
+    </tr>
+    <tr class="grand">
+      <td class="label">Grand Total</td>
+      <td class="value">{{ totals.grand_total }}</td>
+    </tr>
+  </table>
+
+  {% if invoice.terms_and_conditions %}
+  <div class="terms">
+    <strong>Terms &amp; Conditions</strong><br/>
+    {{ invoice.terms_and_conditions }}
+  </div>
+  {% endif %}
+</body>
+</html>

@@ -1,3 +1,6 @@
+from venv import logger
+
+from django.tasks import task
 from django.utils import timezone
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, render
@@ -21,6 +24,13 @@ from django.conf import settings
 from django.core.mail import send_mail
 
 from django.db.models import Q
+from rest_framework import status
+from django.template.loader import render_to_string
+from io import BytesIO
+from xhtml2pdf import pisa
+from django.utils.dateparse import parse_date
+
+from AdminApp.services import get_related_label, notify_user
 
 
 # .............. authentication..............
@@ -47,7 +57,10 @@ def user_signup(request):
 
     if not password:
         return Response({"message": "Password is required"}, status=400)
-
+    
+    if len(password) < 8:
+            return Response({"message": "Password must be at least 8 characters long"}, status=400)
+    
     if not company_name:
         return Response({"message": "Company name is required"}, status=400)
 
@@ -188,6 +201,9 @@ def user_login(request):
             status=403
         )
 
+    user.last_login = timezone.now()
+    user.save(update_fields=["last_login"])
+
     refresh = RefreshToken.for_user(user)
 
     return JsonResponse({
@@ -309,7 +325,7 @@ def add_lead(request):
         )
 
     try:
-        Lead.objects.create(
+        lead = Lead.objects.create(
             company=request.company,
             full_name=full_name,
             phone_number=phone_number,
@@ -322,6 +338,26 @@ def add_lead(request):
             expected_closing_date=expected_closing_date,
             lead_description=lead_description,
         )
+
+        if lead.assigned_to and lead.assigned_to.user:
+            try:
+                notify_user(
+                    company=request.company,
+                    user=lead.assigned_to.user,
+                    notification_type="lead_assigned",
+                    title="New Lead Assigned",
+                    message=(
+                        f"Hello {lead.assigned_to.full_name},\n\n"
+                        f"A new lead has been assigned to you.\n\n"
+                        f"Lead: {lead.full_name}\n"
+                        f"Company: {lead.company_name}\n"
+                        f"Phone: {lead.phone_number}\n"
+                        f"Priority: {lead.priority}\n\n"
+                        f"Please log in to the CRM to view the lead details."
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify staff for lead %s", lead.id)
 
         return HttpResponse("Lead created successfully", status=201)
 
@@ -391,6 +427,8 @@ def update_lead(request, id):
     except Lead.DoesNotExist:
         return HttpResponse("Lead not found", status=404)
 
+    previous_staff_id = lead.assigned_to_id
+
     lead.full_name = request.data.get("full_name") or lead.full_name
     lead.phone_number = request.data.get("phone_number") or lead.phone_number
     lead.email = request.data.get("email") or lead.email
@@ -412,6 +450,26 @@ def update_lead(request, id):
 
     try:
         lead.save()
+
+        if lead.assigned_to and lead.assigned_to_id != previous_staff_id and lead.assigned_to.user:
+            try:
+                notify_user(
+                    company=request.company,
+                    user=lead.assigned_to.user,
+                    notification_type="lead_assigned",
+                    title="Lead Assigned to You",
+                    message=(
+                        f"Hello {lead.assigned_to.full_name},\n\n"
+                        f"A lead has been reassigned to you.\n\n"
+                        f"Lead: {lead.full_name}\n"
+                        f"Company: {lead.company_name}\n"
+                        f"Priority: {lead.priority}\n\n"
+                        f"Please log in to the CRM to view the lead details."
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify staff for reassigned lead %s", lead.id)
+
         return HttpResponse("Lead updated successfully", status=200)
     except Exception as e:
         print("SAVE ERROR:", str(e))
@@ -428,7 +486,7 @@ def delete_lead(request, id):
 
 # ...............deal....................
 # ............ add lead id in add deal ..............
-from .models import Deal, Lead, Customer, Staff
+from .models import Deal, Lead, Customer, Notification, NotificationPreference, Staff
 from .models import Accounts  # adjust import path/name to match your app
 
 
@@ -514,7 +572,7 @@ def add_deal(request):
         return HttpResponse(err, status=404)
 
     try:
-        Deal.objects.create(
+        deal = Deal.objects.create(
             company=request.company,
             deal_name=deal_name,
             company_name=company_name,
@@ -528,6 +586,26 @@ def add_deal(request):
             customer=customer,
             account=account,
         )
+
+        if deal.assigned_to and deal.assigned_to.user:
+            try:
+                notify_user(
+                    company=request.company,
+                    user=deal.assigned_to.user,
+                    notification_type="deal_assigned",
+                    title="New Deal Assigned",
+                    message=(
+                        f"Hello {deal.assigned_to.full_name},\n\n"
+                        f"A new deal has been assigned to you.\n\n"
+                        f"Deal: {deal.deal_name}\n"
+                        f"Company: {deal.company_name}\n"
+                        f"Stage: {deal.stage}\n"
+                        f"Amount: {deal.deal_amount}\n\n"
+                        f"Please log in to the CRM to view the deal details."
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify staff for deal %s", deal.id)
 
         return HttpResponse("Deal created successfully", status=201)
 
@@ -561,6 +639,8 @@ def update_deal(request, id):
         deal = Deal.objects.get(id=id, company=request.company)
     except Deal.DoesNotExist:
         return HttpResponse("Deal not found", status=404)
+
+    previous_staff_id = deal.assigned_to_id
 
     deal.deal_name = request.data.get("deal_name") or deal.deal_name
     deal.company_name = request.data.get("company_name") or deal.company_name
@@ -596,6 +676,27 @@ def update_deal(request, id):
 
     try:
         deal.save()
+
+        if deal.assigned_to and deal.assigned_to_id != previous_staff_id and deal.assigned_to.user:
+            try:
+                notify_user(
+                    company=request.company,
+                    user=deal.assigned_to.user,
+                    notification_type="deal_assigned",
+                    title="Deal Assigned to You",
+                    message=(
+                        f"Hello {deal.assigned_to.full_name},\n\n"
+                        f"A deal has been reassigned to you.\n\n"
+                        f"Deal: {deal.deal_name}\n"
+                        f"Company: {deal.company_name}\n"
+                        f"Stage: {deal.stage}\n"
+                        f"Amount: {deal.deal_amount}\n\n"
+                        f"Please log in to the CRM to view the deal details."
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify staff for reassigned deal %s", deal.id)
+
         return HttpResponse("Deal updated successfully", status=200)
     except Exception as e:
         return HttpResponse(str(e), status=500)
@@ -757,9 +858,9 @@ def add_task(request):
     title = request.data.get("title")
     description = request.data.get("description")
     assigned_to = request.data.get("assigned_to")
-    priority = request.data.get("priority")
+    priority = request.data.get("priority", "medium")
     status = request.data.get("status")
-    due_date = request.data.get("due_date")
+    due_date_raw = request.data.get("due_date")
 
     related_type = request.data.get("related_type", "none")
     related_lead_id = request.data.get("related_lead")
@@ -767,8 +868,18 @@ def add_task(request):
     related_deal_id = request.data.get("related_deal")
     related_account_id = request.data.get("related_account")
 
-    if not title or not due_date:
-        return HttpResponse("Title and due_date are mandatory fields", status=400)
+    if not title or not due_date_raw:
+        return JsonResponse(
+            {"error": "Title and due_date are mandatory fields"},
+            status=400
+        )
+
+    due_date = parse_date(due_date_raw)
+    if not due_date:
+        return JsonResponse(
+            {"error": "due_date must be a valid date (YYYY-MM-DD)"},
+            status=400
+        )
 
     status_map = {
         "pending": "pending",
@@ -778,12 +889,27 @@ def add_task(request):
     }
     status = status_map.get(status.lower() if status else "pending", "pending")
 
+    priority = priority.lower() if priority else "medium"
+    priority_choices = {"low", "medium", "high"}
+    if priority not in priority_choices:
+        return JsonResponse(
+            {"error": f"priority must be one of {sorted(priority_choices)}"},
+            status=400
+        )
+
+    valid_related_types = {"lead", "contact", "deal", "account", "none"}
+    if related_type not in valid_related_types:
+        return JsonResponse(
+            {"error": f"related_type must be one of {sorted(valid_related_types)}"},
+            status=400
+        )
+
     staff = None
     if assigned_to:
         try:
             staff = Staff.objects.get(id=assigned_to, company=request.company)
         except Staff.DoesNotExist:
-            return HttpResponse("Invalid staff", status=400)
+            return JsonResponse({"error": "Invalid staff"}, status=400)
 
     lead = contact = deal = account = None
     try:
@@ -796,26 +922,59 @@ def add_task(request):
         elif related_type == "account" and related_account_id:
             account = Accounts.objects.get(id=related_account_id, company=request.company)
     except (Lead.DoesNotExist, Customer.DoesNotExist, Deal.DoesNotExist, Accounts.DoesNotExist):
-        return HttpResponse("Invalid related record", status=400)
+        return JsonResponse({"error": "Invalid related record"}, status=400)
 
     try:
-        Task.objects.create(
-            company=request.company,
-            title=title,
-            description=description,
-            assigned_to=staff,
-            lead=lead,
-            contact=contact,
-            deal=deal,
-            account=account,
-            priority=priority,
-            status=status,
-            due_date=due_date,
-        )
-        return HttpResponse("Task created successfully", status=201)
+        with transaction.atomic():
+            task = Task.objects.create(
+                company=request.company,
+                title=title,
+                description=description,
+                assigned_to=staff,
+                lead=lead,
+                contact=contact,
+                deal=deal,
+                account=account,
+                priority=priority,
+                status=status,
+                due_date=due_date,
+            )
     except Exception as e:
-        return HttpResponse(str(e), status=500)
+        return JsonResponse({"error": str(e)}, status=500)
 
+    # Notification failure shouldn't undo a successful task creation
+    if staff and staff.user:
+        related_label = get_related_label(related_type, lead, contact, deal, account)
+        try:
+            notify_user(
+                company=request.company,
+                user=staff.user,
+                notification_type="task_assigned",
+                title="New Task Assigned",
+                message=(
+                    f"Hello {staff.full_name},\n\n"
+                    f"A new task has been assigned to you.\n\n"
+                    f"Task: {task.title}\n"
+                    f"Priority: {task.priority}\n"
+                    f"Due Date: {task.due_date}\n"
+                    + (f"Related To: {related_label}\n" if related_label else "")
+                    + "\nPlease log in to the CRM to view the task details."
+                ),
+            )
+        except Exception:
+            logger.exception("Failed to notify staff for task %s", task.id)
+
+    return JsonResponse({
+        "id": task.id,
+        "title": task.title,
+        "description": task.description,
+        "assignedTo": staff.id if staff else None,
+        "assignedToName": staff.full_name if staff else None,
+        "priority": task.priority,
+        "status": task.status,
+        "dueDate": task.due_date,
+        "relatedType": related_type,
+    }, status=201)
 
 @api_view(['GET'])
 def view_tasks(request):
@@ -1036,7 +1195,7 @@ Thank you.
 
 @api_view(['GET'])
 def view_staff(request):
-    staffs = Staff.objects.filter(company=request.company)
+    staffs = Staff.objects.filter(company=request.company).select_related("user")
     data = []
 
     for i in staffs:
@@ -1048,15 +1207,15 @@ def view_staff(request):
             "department": i.department,
             "status": "Invited" if i.is_invited else "Active",
             "invitedAt": i.invited_at.isoformat() if i.invited_at else None,
+            "lastActive": i.user.last_login.isoformat() if i.user and i.user.last_login else None,
         })
 
     return JsonResponse(data, safe=False)
 
 
-
 @api_view(['GET'])
 def view_single_staff(request, id):
-    staff = get_object_or_404(Staff, id=id, company=request.company)
+    staff = get_object_or_404(Staff.objects.select_related("company", "user"), id=id, company=request.company)
 
     data = {
                 "c_id":staff.company.name,
@@ -1067,10 +1226,10 @@ def view_single_staff(request, id):
                 "department": staff.department,
                 "status": "Invited" if staff.is_invited else "Active",
                 "invitedAt": staff.invited_at.isoformat() if staff.invited_at else None,
+                "lastActive": staff.user.last_login.isoformat() if staff.user and staff.user.last_login else None,
             }
 
     return JsonResponse(data, safe=False)
-
 
 @api_view(['PUT'])
 def update_staff(request, id):
@@ -1266,10 +1425,7 @@ def convert_lead(request, lead_id):
                     lead.email,
                 ),
 
-                industry=request.data.get(
-                    "industry",
-                    lead.industry,
-                ),
+                industry=request.data.get("industry", ""),
             )
 
     # ----------------------------
@@ -1318,6 +1474,19 @@ def convert_lead(request, lead_id):
 
         related_type = request.data.get("related_type")
 
+        deal_kwargs = {
+            "company": request.company,
+            "lead": lead,
+            "deal_name": request.data.get("deal_name", f"{lead.company_name} Deal"),
+            "deal_amount": request.data.get("deal_amount") or 0,
+            "stage": request.data.get("stage") or "Proposal",
+            "assigned_to_id": request.data.get("assigned_to") or None,
+            "expected_close_date": request.data.get("expected_closing_date") or None,
+            "deal_source": request.data.get("deal_source") or "",
+            "priority": request.data.get("priority") or "Medium",
+            "deal_description": request.data.get("description") or "",
+        }
+
         if related_type == "customer":
 
             if customer is None:
@@ -1332,14 +1501,9 @@ def convert_lead(request, lead_id):
                 )
 
             deal = Deal.objects.create(
-                company=request.company,
                 customer=customer,
                 account=None,
-                lead=lead,
-                deal_name=request.data.get(
-                    "deal_name",
-                    f"{lead.company_name} Deal"
-                ),
+                **deal_kwargs,
             )
 
         elif related_type == "account":
@@ -1355,15 +1519,11 @@ def convert_lead(request, lead_id):
                 )
 
             deal = Deal.objects.create(
-                company=request.company,
                 customer=None,
                 account=account,
-                lead=lead,
-                deal_name=request.data.get(
-                    "deal_name",
-                    f"{lead.company_name} Deal"
-                ),
+                **deal_kwargs,
             )
+
     # ----------------------------
     # UPDATE LEAD
     # ----------------------------
@@ -1381,7 +1541,6 @@ def convert_lead(request, lead_id):
 
         "deal_id": deal.id if deal else None,
     })
-
 
     
 # ............ unconverted lead show in dropdown ........
@@ -2209,6 +2368,26 @@ def add_meeting(request):
         if participant_ids:
             meeting.participants.set(participant_ids)
 
+        if meeting.host and meeting.host.user:
+            try:
+                notify_user(
+                    company=request.company,
+                    user=meeting.host.user,
+                    notification_type="meeting_reminder",
+                    title="New Meeting Scheduled",
+                    message=(
+                        f"Hello {meeting.host.full_name},\n\n"
+                        f"You have been set as the host for a new meeting.\n\n"
+                        f"Meeting: {meeting.title}\n"
+                        f"Venue: {meeting.get_meeting_venue_display()}\n"
+                        f"From: {meeting.from_datetime}\n"
+                        f"To: {meeting.to_datetime}\n\n"
+                        f"Please log in to the CRM to view the meeting details."
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify host for meeting %s", meeting.id)
+
         return HttpResponse("Meeting created successfully", status=201)
 
     except Exception as e:
@@ -2289,6 +2468,8 @@ def update_meeting(request, id):
     except Meeting.DoesNotExist:
         return HttpResponse("Meeting not found", status=404)
 
+    previous_host_id = meeting.host_id
+
     try:
         meeting.title = request.data.get("title") or meeting.title
         meeting.meeting_venue = request.data.get("meeting_venue") or meeting.meeting_venue
@@ -2344,6 +2525,25 @@ def update_meeting(request, id):
         if participant_ids is not None:
             meeting.participants.set(participant_ids)
 
+        if meeting.host and meeting.host_id != previous_host_id and meeting.host.user:
+            try:
+                notify_user(
+                    company=request.company,
+                    user=meeting.host.user,
+                    notification_type="meeting_reminder",
+                    title="You've Been Set as Meeting Host",
+                    message=(
+                        f"Hello {meeting.host.full_name},\n\n"
+                        f"You have been set as the host for a meeting.\n\n"
+                        f"Meeting: {meeting.title}\n"
+                        f"From: {meeting.from_datetime}\n"
+                        f"To: {meeting.to_datetime}\n\n"
+                        f"Please log in to the CRM to view the meeting details."
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify host for updated meeting %s", meeting.id)
+
         return HttpResponse("Meeting updated successfully", status=200)
 
     except Exception as e:
@@ -2396,6 +2596,27 @@ def add_call(request):
             deal_id=related_deal_id if related_type == "deal" else None,
             account_id=related_account_id if related_type == "account" else None,
         )
+
+        if call.assigned_to and call.assigned_to.user:
+            related_label = get_related_label(related_type, call.lead, call.contact, call.deal, call.account)
+            try:
+                notify_user(
+                    company=request.company,
+                    user=call.assigned_to.user,
+                    notification_type="call_assigned",
+                    title="New Call Assigned",
+                    message=(
+                        f"Hello {call.assigned_to.full_name},\n\n"
+                        f"A new call has been assigned to you.\n\n"
+                        f"Call: {call.subject}\n"
+                        f"Type: {call.call_type}\n"
+                        f"Start Time: {call.start_time}\n"
+                        + (f"Related To: {related_label}\n" if related_label else "")
+                        + "\nPlease log in to the CRM to view the call details."
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify staff for call %s", call.id)
 
         return HttpResponse("Call created successfully", status=201)
 
@@ -2470,6 +2691,8 @@ def update_call(request, id):
     except Call.DoesNotExist:
         return HttpResponse("Call not found", status=404)
 
+    previous_staff_id = call.assigned_to_id
+
     try:
         call.subject = request.data.get("subject") or call.subject
         call.call_type = request.data.get("call_type") or call.call_type
@@ -2506,6 +2729,29 @@ def update_call(request, id):
                 call.account_id = request.data.get("related_account") or None
 
         call.save()
+
+        if call.assigned_to and call.assigned_to_id != previous_staff_id and call.assigned_to.user:
+            related_type_resolved = "lead" if call.lead else "contact" if call.contact else "deal" if call.deal else "account" if call.account else "none"
+            related_label = get_related_label(related_type_resolved, call.lead, call.contact, call.deal, call.account)
+            try:
+                notify_user(
+                    company=request.company,
+                    user=call.assigned_to.user,
+                    notification_type="call_assigned",
+                    title="Call Assigned to You",
+                    message=(
+                        f"Hello {call.assigned_to.full_name},\n\n"
+                        f"A call has been reassigned to you.\n\n"
+                        f"Call: {call.subject}\n"
+                        f"Type: {call.call_type}\n"
+                        f"Start Time: {call.start_time}\n"
+                        + (f"Related To: {related_label}\n" if related_label else "")
+                        + "\nPlease log in to the CRM to view the call details."
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify staff for reassigned call %s", call.id)
+
         return HttpResponse("Call updated successfully", status=200)
 
     except Exception as e:
@@ -3159,6 +3405,9 @@ def get_quote_prefill(request, quote_id):
         "subject": quote.subject,
         "contactName": quote.contact_name,
 
+        "accountId": quote.account.id if quote.account else None,
+        "accountName": quote.account.company_name if quote.account else "",
+
         "customerId": quote.customer.id if quote.customer else None,
         "customerName": quote.customer.company_name if quote.customer else "",
 
@@ -3198,7 +3447,6 @@ def add_sales_order(request):
         shipping_address = None
         quote = None
 
-        # Fetch the quote once if linked, and reuse it for address/deal/items
         if quote_id:
             try:
                 quote = Quotes.objects.select_related(
@@ -3207,7 +3455,6 @@ def add_sales_order(request):
             except Quotes.DoesNotExist:
                 quote = None
 
-        # --- Address auto-fill ---
         if quote and not billing_data and not shipping_data:
             if quote.billing_address:
                 billing_address = Address.objects.create(
@@ -3231,9 +3478,8 @@ def add_sales_order(request):
             billing_address = _create_address(billing_data)
             shipping_address = _create_address(shipping_data)
 
-        # --- Deal auto-fill ---
         if quote and not deal_id:
-            deal_id = quote.deal_id  # adjust field name if it's e.g. quote.deal.id
+            deal_id = quote.deal_id
 
         sales_order = SalesOrder.objects.create(
             company=request.company,
@@ -3254,7 +3500,6 @@ def add_sales_order(request):
             description=description,
         )
 
-        # --- Items: use request items if given, else pull from the quote ---
         if not items_data and quote:
             items_data = [
                 {
@@ -3283,6 +3528,25 @@ def add_sales_order(request):
                 tax=tax,
                 description=item.get("description", ""),
             )
+
+        if sales_order.owner and sales_order.owner.user:
+            try:
+                notify_user(
+                    company=request.company,
+                    user=sales_order.owner.user,
+                    notification_type="sales_order",
+                    title="New Sales Order Assigned",
+                    message=(
+                        f"Hello {sales_order.owner.full_name},\n\n"
+                        f"A new sales order has been assigned to you.\n\n"
+                        f"Sales Order: {sales_order.subject}\n"
+                        f"Customer: {sales_order.customer.company_name}\n"
+                        f"Status: {sales_order.status}\n\n"
+                        f"Please log in to the CRM to view the sales order details."
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify staff for sales order %s", sales_order.id)
 
         return HttpResponse("Sales order created successfully", status=201)
 
@@ -3407,6 +3671,8 @@ def update_sales_order(request, id):
     except SalesOrder.DoesNotExist:
         return HttpResponse("Sales order not found", status=404)
 
+    previous_owner_id = order.owner_id
+
     try:
         with transaction.atomic():
             order.subject = request.data.get("subject") or order.subject
@@ -3464,6 +3730,25 @@ def update_sales_order(request, id):
                         tax=tax,
                         description=item.get("description", ""),
                     )
+
+        if order.owner and order.owner_id != previous_owner_id and order.owner.user:
+            try:
+                notify_user(
+                    company=request.company,
+                    user=order.owner.user,
+                    notification_type="sales_order",
+                    title="Sales Order Assigned to You",
+                    message=(
+                        f"Hello {order.owner.full_name},\n\n"
+                        f"A sales order has been reassigned to you.\n\n"
+                        f"Sales Order: {order.subject}\n"
+                        f"Customer: {order.customer.company_name}\n"
+                        f"Status: {order.status}\n\n"
+                        f"Please log in to the CRM to view the sales order details."
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify staff for reassigned sales order %s", order.id)
 
         return HttpResponse("Sales order updated successfully", status=200)
 
@@ -3541,7 +3826,6 @@ def add_invoice(request):
         return HttpResponse("Subject, customer and invoice_date are required", status=400)
 
     try:
-        # Auto-fill from sales order if linked and no address provided
         billing_address = None
         shipping_address = None
 
@@ -3571,7 +3855,6 @@ def add_invoice(request):
                         zip_code=sales_order.shipping_address.zip_code,
                     )
 
-                # Auto-fill items from sales order if none provided
                 if not items_data:
                     items_data = [
                         {
@@ -3616,6 +3899,25 @@ def add_invoice(request):
                 discount=float(item.get("discount", 0)),
                 tax=float(item.get("tax", 0)),
             )
+
+        if invoice.owner and invoice.owner.user:
+            try:
+                notify_user(
+                    company=request.company,
+                    user=invoice.owner.user,
+                    notification_type="invoice_created",
+                    title="New Invoice Assigned",
+                    message=(
+                        f"Hello {invoice.owner.full_name},\n\n"
+                        f"A new invoice has been assigned to you.\n\n"
+                        f"Invoice: {invoice.invoice_number} - {invoice.subject}\n"
+                        f"Customer: {invoice.customer.company_name}\n"
+                        f"Status: {invoice.status}\n\n"
+                        f"Please log in to the CRM to view the invoice details."
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify staff for invoice %s", invoice.id)
 
         return HttpResponse("Invoice created successfully", status=201)
 
@@ -3731,6 +4033,8 @@ def update_invoice(request, id):
     except Invoice.DoesNotExist:
         return HttpResponse("Invoice not found", status=404)
 
+    previous_owner_id = invoice.owner_id
+
     try:
         invoice.subject = request.data.get("subject") or invoice.subject
         invoice.status = request.data.get("status", invoice.status)
@@ -3779,12 +4083,30 @@ def update_invoice(request, id):
                     tax=float(item.get("tax", 0)),
                 )
 
+        if invoice.owner and invoice.owner_id != previous_owner_id and invoice.owner.user:
+            try:
+                notify_user(
+                    company=request.company,
+                    user=invoice.owner.user,
+                    notification_type="invoice_created",
+                    title="Invoice Assigned to You",
+                    message=(
+                        f"Hello {invoice.owner.full_name},\n\n"
+                        f"An invoice has been reassigned to you.\n\n"
+                        f"Invoice: {invoice.invoice_number} - {invoice.subject}\n"
+                        f"Customer: {invoice.customer.company_name}\n"
+                        f"Status: {invoice.status}\n\n"
+                        f"Please log in to the CRM to view the invoice details."
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify staff for reassigned invoice %s", invoice.id)
+
         return HttpResponse("Invoice updated successfully", status=200)
 
     except Exception as e:
         print("UPDATE INVOICE ERROR:", str(e))
         return HttpResponse(str(e), status=500)
-
 
 @api_view(['DELETE'])
 def delete_invoice(request, id):
@@ -3794,8 +4116,79 @@ def delete_invoice(request, id):
         return JsonResponse({"message": "Invoice deleted successfully"})
     except Invoice.DoesNotExist:
         return HttpResponse("Invoice not found", status=404)
-    
 
+
+def _address_dict(address):
+    if not address:
+        return {"address": "", "street_address": "", "city": "", "state": "", "zip_code": "", "country": ""}
+    return {
+        "address": address.address or "",
+        "street_address": getattr(address, "street_address", "") or "",
+        "city": address.city or "",
+        "state": address.state or "",
+        "zip_code": address.zip_code or "",
+        "country": address.country or "",
+    }
+
+
+@api_view(["GET"])
+def invoice_pdf(request, pk):
+    try:
+        invoice = Invoice.objects.select_related(
+            "customer", "billing_address", "shipping_address"
+        ).prefetch_related("items__product").get(pk=pk, company=request.company)
+    except Invoice.DoesNotExist:
+        return Response({"detail": "Invoice not found."}, status=404)
+
+    items_data = []
+    sub_total = discount_total = tax_total = 0
+
+    for item in invoice.items.all():
+        amount = float(item.list_price) * item.quantity
+        sub_total += amount
+        discount_total += float(item.discount)
+        tax_total += float(item.tax)
+        items_data.append({
+            "product_name": item.product.name if item.product else "",
+            "quantity": item.quantity,
+            "list_price": f"{item.list_price:.2f}",
+            "discount": f"{item.discount:.2f}",
+            "tax": f"{item.tax:.2f}",
+            "line_total": f"{item.line_total:.2f}",
+        })
+
+    grand_total = sub_total - discount_total + tax_total
+
+    html_string = render_to_string("invoice_pdf.html", {
+        "invoice": {
+            "invoice_number": invoice.invoice_number,
+            "subject": invoice.subject,
+            "invoice_date": invoice.invoice_date,
+            "due_date": invoice.due_date,
+            "status": invoice.status,
+            "purchase_order_number": invoice.purchase_order_number,
+            "terms_and_conditions": invoice.terms_and_conditions,
+            "customer_name": invoice.customer.company_name if invoice.customer else "",
+        },
+        "billing": _address_dict(invoice.billing_address),
+        "items": items_data,
+        "totals": {
+            "sub_total": f"{sub_total:.2f}",
+            "discount_total": f"{discount_total:.2f}",
+            "tax_total": f"{tax_total:.2f}",
+            "grand_total": f"{grand_total:.2f}",
+        },
+    })
+
+    result = BytesIO()
+    pdf = pisa.CreatePDF(src=html_string, dest=result)
+
+    if pdf.err:
+        return Response({"detail": "Failed to generate PDF."}, status=500)
+
+    response = HttpResponse(result.getvalue(), content_type="application/pdf")
+    response["Content-Disposition"] = f'attachment; filename="{invoice.invoice_number}.pdf"'
+    return response
 
 # .............. purchase order ...............
 @api_view(['POST'])
@@ -3974,6 +4367,8 @@ def update_purchase_order(request, id):
     except PurchaseOrder.DoesNotExist:
         return HttpResponse("Purchase order not found", status=404)
 
+    previous_owner_id = order.owner_id
+
     try:
         order.subject = request.data.get("subject") or order.subject
         order.status = request.data.get("status", order.status)
@@ -4018,6 +4413,25 @@ def update_purchase_order(request, id):
                     description=item.get("description", ""),
                 )
 
+        if order.owner and order.owner_id != previous_owner_id and order.owner.user:
+            try:
+                notify_user(
+                    company=request.company,
+                    user=order.owner.user,
+                    notification_type="purchase_order",
+                    title="Purchase Order Assigned to You",
+                    message=(
+                        f"Hello {order.owner.full_name},\n\n"
+                        f"A purchase order has been reassigned to you.\n\n"
+                        f"Purchase Order: {order.purchase_order_number} - {order.subject}\n"
+                        f"Vendor: {order.vendor.vendor_name}\n"
+                        f"Status: {order.status}\n\n"
+                        f"Please log in to the CRM to view the purchase order details."
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify staff for reassigned purchase order %s", order.id)
+
         return HttpResponse("Purchase order updated successfully", status=200)
 
     except Exception as e:
@@ -4060,6 +4474,25 @@ def add_case(request):
             resolution=request.data.get("resolution", ""),
             created_by=request.staff,  # auto-fill logged in user
         )
+
+        if case.assigned_to and case.assigned_to.user:
+            try:
+                notify_user(
+                    company=request.company,
+                    user=case.assigned_to.user,
+                    notification_type="case_assigned",
+                    title="New Case Assigned",
+                    message=(
+                        f"Hello {case.assigned_to.full_name},\n\n"
+                        f"A new case has been assigned to you.\n\n"
+                        f"Case: {case.case_number} - {case.subject}\n"
+                        f"Priority: {case.priority}\n"
+                        f"Status: {case.status}\n\n"
+                        f"Please log in to the CRM to view the case details."
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify staff for case %s", case.id)
 
         return JsonResponse({
             "message": "Case created successfully",
@@ -4145,6 +4578,8 @@ def update_case(request, id):
     except Case.DoesNotExist:
         return HttpResponse("Case not found", status=404)
 
+    previous_staff_id = case.assigned_to_id
+
     try:
         case.subject = request.data.get("subject") or case.subject
         case.description = request.data.get("description") or case.description
@@ -4170,6 +4605,26 @@ def update_case(request, id):
             case.assigned_to_id = assigned_to_id
 
         case.save()
+
+        if case.assigned_to and case.assigned_to_id != previous_staff_id and case.assigned_to.user:
+            try:
+                notify_user(
+                    company=request.company,
+                    user=case.assigned_to.user,
+                    notification_type="case_assigned",
+                    title="Case Assigned to You",
+                    message=(
+                        f"Hello {case.assigned_to.full_name},\n\n"
+                        f"A case has been reassigned to you.\n\n"
+                        f"Case: {case.case_number} - {case.subject}\n"
+                        f"Priority: {case.priority}\n"
+                        f"Status: {case.status}\n\n"
+                        f"Please log in to the CRM to view the case details."
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify staff for reassigned case %s", case.id)
+
         return HttpResponse("Case updated successfully", status=200)
 
     except Exception as e:
@@ -4438,3 +4893,219 @@ def delete_service(request, id):
         return JsonResponse({"message": "Service deleted successfully"})
     except Service.DoesNotExist:
         return HttpResponse("Service not found", status=404)
+
+# ............. profile ..............
+def _serialize_profile(staff):
+    addr = staff.address
+    return {
+        "id": staff.id,
+        "fullName": staff.full_name,
+        "lastName": staff.last_name,
+        "email": staff.email,
+        "role": staff.get_role_display() if staff.role else "",
+        "roleValue": staff.role,
+        "department": staff.department,
+        "profileType": staff.profile_type,
+        "mobile": staff.mobile,
+        "website": staff.website,
+        "fax": staff.fax,
+        "alias": staff.alias,
+        "dateOfBirth": staff.date_of_birth.isoformat() if staff.date_of_birth else "",
+        "street": addr.street_address if addr else "",
+        "city": addr.city if addr else "",
+        "state": addr.state if addr else "",
+        "zipCode": addr.zip_code if addr else "",
+        "country": addr.country if addr else "",
+        "addedBy": staff.added_by.full_name if staff.added_by else "",
+    }
+
+
+@api_view(["GET"])
+def get_profile(request):
+    return Response(_serialize_profile(request.staff))
+
+
+@api_view(["PATCH"])
+def update_profile(request):
+    staff = request.staff
+    data = request.data
+
+    editable_fields = [
+        ("full_name", "fullName"),
+        ("last_name", "lastName"),
+        ("mobile", "mobile"),
+        ("website", "website"),
+        ("fax", "fax"),
+        ("alias", "alias"),
+        ("profile_type", "profileType"),
+    ]
+
+    for model_field, payload_key in editable_fields:
+        if payload_key in data:
+            setattr(staff, model_field, data.get(payload_key) or "")
+
+    if "dateOfBirth" in data:
+        raw_dob = data.get("dateOfBirth")
+        staff.date_of_birth = parse_date(raw_dob) if raw_dob else None
+
+    address_fields = {
+        "street_address": data.get("street"),
+        "city": data.get("city"),
+        "state": data.get("state"),
+        "zip_code": data.get("zipCode"),
+        "country": data.get("country"),
+    }
+    has_address_data = any(v for v in address_fields.values())
+
+    if has_address_data:
+        if staff.address is None:
+            staff.address = Address.objects.create(**{k: v or "" for k, v in address_fields.items()})
+        else:
+            for field, value in address_fields.items():
+                if value is not None:
+                    setattr(staff.address, field, value)
+            staff.address.save()
+
+    staff.save()
+    return Response(_serialize_profile(staff))
+
+
+
+# ............. notification ...............
+FIELD_MAP = {
+    "dailyDigest": "email_daily_digest",
+    "newLeadAlerts": "email_new_lead_alerts",
+    "systemUpdates": "email_system_updates",
+    "taskAssignments": "email_task_assignments",
+    "emailMeetingReminders": "email_meeting_reminders",
+    "callAssignments": "email_call_assignments",
+    "dealAssignments": "email_deal_assignments",
+    "caseAssignments": "email_case_assignments",
+    "salesOrderUpdates": "email_sales_order_updates",
+    "purchaseOrderUpdates": "email_purchase_order_updates",
+    "invoiceUpdates": "email_invoice_updates",
+    "highPriorityTasks": "push_high_priority_tasks",
+    "meetingReminders": "push_meeting_reminders",
+    "activityBellDot": "inapp_activity_bell",
+    "toastAlerts": "inapp_toast_alerts",
+    "notificationSound": "desktop_notification_sound",
+    "floatingPreview": "desktop_floating_preview",
+}
+
+def to_camel(pref):
+    return {camel: getattr(pref, field) for camel, field in FIELD_MAP.items()}
+
+
+@api_view(['GET', 'PUT'])
+def notification_preferences(request):
+    pref, _ = NotificationPreference.objects.get_or_create(
+        company=request.company, user=request.user
+    )
+
+    if request.method == 'GET':
+        return JsonResponse(to_camel(pref))
+
+    if request.method == 'PUT':
+        data = request.data
+        unknown_keys = [k for k in data.keys() if k not in FIELD_MAP]
+        if unknown_keys:
+            return JsonResponse(
+                {"error": f"Unknown field(s): {', '.join(unknown_keys)}"},
+                status=400
+            )
+
+        for camel, field in FIELD_MAP.items():
+            if camel in data:
+                setattr(pref, field, bool(data[camel]))
+        pref.save()
+        return JsonResponse(to_camel(pref))
+
+
+@api_view(["GET"])
+def get_notifications(request):
+    notifications = Notification.objects.filter(
+        company=request.company,
+        user=request.user
+    )
+
+    data = [
+        {
+            "id": n.id,
+            "title": n.title,
+            "message": n.message,
+            "type": n.notification_type,
+            "is_read": n.is_read,
+            "created_at": n.created_at,
+        }
+        for n in notifications
+    ]
+
+    return Response(data)
+
+@api_view(["GET"])
+def get_unread_count(request):
+    count = Notification.objects.filter(
+        company=request.company,
+        user=request.user,
+        is_read=False
+    ).count()
+
+    return Response({"count": count})
+
+@api_view(["PUT"])
+def mark_notification_read(request, id):
+    notification = get_object_or_404(
+        Notification,
+        id=id,
+        company=request.company,
+        user=request.user,
+    )
+
+    notification.is_read = True
+    notification.save()
+
+    return Response({"message": "Success"})
+
+@api_view(["PUT"])
+def mark_all_notifications_read(request):
+    Notification.objects.filter(
+        company=request.company,
+        user=request.user,
+        is_read=False,
+    ).update(is_read=True)
+
+    return Response({"message": "Success"})
+
+
+
+# ............... change pass ...............
+
+@api_view(['POST'])
+def change_password(request):
+    user = request.user
+
+    current_password = request.data.get("current_password")
+    new_password = request.data.get("new_password")
+    confirm_password = request.data.get("confirm_password")
+
+    if not current_password or not new_password or not confirm_password:
+        return Response({"message": "All fields are required"}, status=400)
+
+    if new_password != confirm_password:
+        return Response({"message": "New password and confirm password do not match"}, status=400)
+
+    if not user.check_password(current_password):
+        return Response({"message": "Current password is incorrect"}, status=400)
+
+    if len(new_password) < 8:
+        return Response({"message": "New password must be at least 8 characters long"}, status=400)
+
+    if current_password == new_password:
+        return Response({"message": "New password must be different from the current password"}, status=400)
+
+    try:
+        user.set_password(new_password)
+        user.save()
+        return Response({"message": "Password updated successfully"}, status=200)
+    except Exception as e:
+        return Response({"message": str(e)}, status=500)
