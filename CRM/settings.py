@@ -39,11 +39,19 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 DEBUG = os.getenv("DEBUG", "False") == "True"
 
 ALLOWED_HOSTS = os.getenv(
-                    "ALLOWED_HOSTS",
-                    "localhost,127.0.0.1",
-                    "tron-crm.netlify.app"
-                ).split(",")
+    "ALLOWED_HOSTS",
+    "localhost,127.0.0.1,crm-backend-ejfr.onrender.com"
+).split(",")
 
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "https://tron-crm.netlify.app"
+]
+
+
+CSRF_TRUSTED_ORIGINS = [
+    "https://tron-crm.netlify.app",
+]
 
 # Application definition
 
@@ -165,7 +173,3 @@ USE_TZ = True
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173",
-    "https://tron-crm.netlify.app/"
-]
