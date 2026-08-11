@@ -1,7 +1,11 @@
 from django.conf import settings
 from django.core.mail import send_mail
+import logging
 
-from AdminApp.models import Notification, NotificationPreference
+from AdminApp.models import Lead, Notification, NotificationPreference, Staff
+
+
+logger = logging.getLogger(__name__)
 
 
 def get_related_label(related_type, lead=None, contact=None, deal=None, account=None):
@@ -90,3 +94,58 @@ def notify_user(
         )
 
     return notification
+
+
+
+def get_meta_lead_staff(company):
+    return Staff.objects.filter(
+        company=company,
+        is_accepted=True,
+        user__is_active=True,
+    ).first()
+
+def create_lead_for_company(
+    company,
+    full_name,
+    phone_number,
+    email=None,
+    company_name="",
+    lead_source="Website",
+    assigned_to=None,
+    priority="Medium",
+    lead_description=None,
+):
+    lead = Lead.objects.create(
+        company=company,
+        full_name=full_name,
+        phone_number=phone_number,
+        email=email,
+        company_name=company_name,
+        lead_source=lead_source,
+        assigned_to=assigned_to,
+        priority=priority,
+        lead_description=lead_description,
+    )
+
+    if lead.assigned_to and lead.assigned_to.user:
+        try:
+            notify_user(
+                company=company,
+                user=lead.assigned_to.user,
+                notification_type="lead_assigned",
+                title="New Lead Assigned",
+                message=(
+                    f"A new lead has been assigned to you.\n\n"
+                    f"Lead: {lead.full_name}\n"
+                    f"Phone: {lead.phone_number}\n"
+                    f"Email: {lead.email or 'N/A'}\n"
+                    f"Source: {lead.lead_source}\n"
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to notify staff for lead %s",
+                lead.id
+            )
+
+    return lead

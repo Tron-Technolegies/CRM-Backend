@@ -1,9 +1,12 @@
 from venv import logger
+from django.core import signing
+from django.shortcuts import redirect
 
 from django.tasks import task
 from django.utils import timezone
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, render
+import requests
 from rest_framework.permissions import AllowAny
 from rest_framework.decorators import api_view, permission_classes
 from django.db.models import Sum
@@ -30,7 +33,7 @@ from io import BytesIO
 from xhtml2pdf import pisa
 from django.utils.dateparse import parse_date
 
-from AdminApp.services import get_related_label, notify_user
+from AdminApp.services import create_lead_for_company, get_related_label, notify_user
 
 
 # .............. authentication..............
@@ -305,18 +308,154 @@ def accept_invitation(request):
 
 
 # ..............lead.......................
+@api_view(["GET"])
+def meta_connect(request):
+    state = signing.dumps(
+        {
+            "company_id": request.company.id,
+        },
+        salt="meta-oauth"
+    )
 
-@api_view(['POST'])
+    meta_url = (
+        "https://www.facebook.com/v24.0/dialog/oauth"
+        f"?client_id={settings.META_APP_ID}"
+        f"&redirect_uri={settings.META_REDIRECT_URI}"
+        f"&config_id={settings.META_CONFIG_ID}"
+        f"&state={state}"
+        "&response_type=code"
+    )
+
+    return redirect(meta_url)
+
+
+@api_view(["GET"])
+def meta_callback(request):
+
+    code = request.GET.get("code")
+    state = request.GET.get("state")
+
+    if not code:
+        return JsonResponse(
+            {"error": "Authorization code not received from Meta"},
+            status=400
+        )
+
+    if not state:
+        return JsonResponse(
+            {"error": "State not received"},
+            status=400
+        )
+
+    # Verify state
+    try:
+        state_data = signing.loads(
+            state,
+            salt="meta-oauth",
+            max_age=600
+        )
+
+        company_id = state_data["company_id"]
+
+    except signing.BadSignature:
+        return JsonResponse(
+            {"error": "Invalid or expired state"},
+            status=400
+        )
+
+    # Exchange code for access token
+    try:
+        response = requests.get(
+            "https://graph.facebook.com/v24.0/oauth/access_token",
+            params={
+                "client_id": settings.META_APP_ID,
+                "client_secret": settings.META_APP_SECRET,
+                "redirect_uri": settings.META_REDIRECT_URI,
+                "code": code,
+            },
+            timeout=30
+        )
+
+        data = response.json()
+
+    except requests.RequestException as e:
+        return JsonResponse(
+            {"error": f"Meta connection failed: {str(e)}"},
+            status=500
+        )
+
+    if "access_token" not in data:
+        return JsonResponse(
+            {
+                "error": "Failed to get Meta access token",
+                "details": data
+            },
+            status=400
+        )
+
+    access_token = data["access_token"]
+
+    # Get Meta user
+    me_response = requests.get(
+        "https://graph.facebook.com/v24.0/me",
+        params={
+            "fields": "id,name",
+            "access_token": access_token,
+        },
+        timeout=30
+    )
+
+    me_data = me_response.json()
+
+    if "error" in me_data:
+        return JsonResponse(
+            {
+                "error": "Failed to get Meta user",
+                "details": me_data
+            },
+            status=400
+        )
+
+    # Get Ad Accounts
+    ad_response = requests.get(
+        "https://graph.facebook.com/v24.0/me/adaccounts",
+        params={
+            "fields": "id,name,account_id",
+            "access_token": access_token,
+        },
+        timeout=30
+    )
+
+    ad_data = ad_response.json()
+
+    if "error" in ad_data:
+        return JsonResponse(
+            {
+                "error": "Failed to get Ad Accounts",
+                "details": ad_data
+            },
+            status=400
+        )
+
+    return JsonResponse({
+        "message": "Meta authorization successful",
+        "company_id": company_id,
+        "meta_user": me_data,
+        "ad_accounts": ad_data.get("data", []),
+    })
+
+
+
+@api_view(["GET", "POST"])
+def meta_webhook(request):
+    return JsonResponse({
+        "message": "Meta webhook endpoint"
+    })
+
+@api_view(["POST"])
 def add_lead(request):
     full_name = request.data.get("full_name")
     phone_number = request.data.get("phone_number")
-    email = request.data.get("email")
-    company_name = request.data.get("company_name")
-    lead_source = request.data.get("lead_source")
-    assigned_to = request.data.get("assigned_to")
-    priority = request.data.get("priority")
-    expected_closing_date = request.data.get("expected_closing_date")
-    lead_description = request.data.get("lead_description")
 
     if not full_name or not phone_number:
         return HttpResponse(
@@ -325,45 +464,45 @@ def add_lead(request):
         )
 
     try:
-        lead = Lead.objects.create(
+        assigned_to_id = request.data.get("assigned_to")
+
+        assigned_to = None
+
+        if assigned_to_id:
+            assigned_to = Staff.objects.get(
+                id=assigned_to_id,
+                company=request.company
+            )
+
+        lead = create_lead_for_company(
             company=request.company,
             full_name=full_name,
             phone_number=phone_number,
-            email=email,
-            company_name=company_name,
-            lead_source=lead_source,
-            assigned_to_id=assigned_to,
-            assigned_to=None,
-            priority=priority,
-            expected_closing_date=expected_closing_date,
-            lead_description=lead_description,
+            email=request.data.get("email"),
+            company_name=request.data.get("company_name", ""),
+            lead_source=request.data.get("lead_source", "Website"),
+            assigned_to=assigned_to,
+            priority=request.data.get("priority", "Medium"),
+            lead_description=request.data.get("lead_description"),
         )
 
-        if lead.assigned_to and lead.assigned_to.user:
-            try:
-                notify_user(
-                    company=request.company,
-                    user=lead.assigned_to.user,
-                    notification_type="lead_assigned",
-                    title="New Lead Assigned",
-                    message=(
-                        f"Hello {lead.assigned_to.full_name},\n\n"
-                        f"A new lead has been assigned to you.\n\n"
-                        f"Lead: {lead.full_name}\n"
-                        f"Company: {lead.company_name}\n"
-                        f"Phone: {lead.phone_number}\n"
-                        f"Priority: {lead.priority}\n\n"
-                        f"Please log in to the CRM to view the lead details."
-                    ),
-                )
-            except Exception:
-                logger.exception("Failed to notify staff for lead %s", lead.id)
+        return HttpResponse(
+            "Lead created successfully",
+            status=201
+        )
 
-        return HttpResponse("Lead created successfully", status=201)
+    except Staff.DoesNotExist:
+        return HttpResponse(
+            "Staff not found",
+            status=404
+        )
 
     except Exception as e:
-        print("ADD LEAD ERROR:", str(e))
-        return HttpResponse(str(e), status=500)
+        logger.exception("ADD LEAD ERROR")
+        return HttpResponse(
+            str(e),
+            status=500
+        )
 
 
 

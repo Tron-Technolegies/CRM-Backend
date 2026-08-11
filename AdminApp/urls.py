@@ -151,4 +151,9 @@ urlpatterns= [
     path("notifications/read-all/", views.mark_all_notifications_read, name='mark_all_notifications_read'),
 
     path('change-password/', views.change_password, name='change_password'),
+
+    path('integrations/meta/connect/', views.meta_connect, name='meta-connect'),
+    path('integrations/meta/callback/', views.meta_callback, name='meta-callback'),
+    path('webhooks/meta/', views.meta_webhook, name='meta-webhook'),
+    path('integrations/meta/callback/', views.meta_callback, name='meta-callback'),
 ]

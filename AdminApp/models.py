@@ -966,3 +966,25 @@ class Notification(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+
+
+
+class MetaIntegration(models.Model):
+    company = models.OneToOneField(Company, on_delete=models.CASCADE, related_name="meta_integration")
+
+    meta_user_id = models.CharField(max_length=255, blank=True, null=True)
+
+    access_token = models.TextField()
+
+    business_id = models.CharField(max_length=255, blank=True, null=True)
+    ad_account_id = models.CharField(max_length=255, blank=True, null=True)
+    page_id = models.CharField(max_length=255, blank=True, null=True)
+    assigned_staff = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="meta_integrations")
+
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.company.name} - Meta Ads"
