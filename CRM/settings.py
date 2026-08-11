@@ -40,13 +40,15 @@ DEBUG = os.getenv("DEBUG", "False") == "True"
 
 ALLOWED_HOSTS = os.getenv(
                     "ALLOWED_HOSTS",
-                    "localhost,127.0.0.1"
+                    "localhost,127.0.0.1",
+                    "tron-crm.netlify.app"
                 ).split(",")
 
 
 # Application definition
 
 INSTALLED_APPS = [
+    "corsheaders",
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -55,7 +57,6 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'AdminApp',
     'rest_framework',
-    "corsheaders",
     'rest_framework_simplejwt.token_blacklist',
 ]
 
@@ -116,6 +117,7 @@ DATABASES = {
 }
 
 
+
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
 
@@ -165,4 +167,5 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
+    "https://tron-crm.netlify.app/"
 ]
