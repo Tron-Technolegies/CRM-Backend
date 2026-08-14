@@ -35,6 +35,8 @@ from django.utils.dateparse import parse_date
 
 from AdminApp.services import create_lead_for_company, get_related_label, notify_user
 
+from .models import MetaIntegration
+
 
 # .............. authentication..............
 @api_view(["POST"])
@@ -329,24 +331,135 @@ def meta_connect(request):
     return redirect(meta_url)
 
 
+# @api_view(["GET"])
+# def meta_callback(request):
+
+#     code = request.GET.get("code")
+#     state = request.GET.get("state")
+
+#     if not code:
+#         return JsonResponse(
+#             {"error": "Authorization code not received from Meta"},
+#             status=400
+#         )
+
+#     if not state:
+#         return JsonResponse(
+#             {"error": "State not received"},
+#             status=400
+#         )
+
+#     # Verify state
+#     try:
+#         state_data = signing.loads(
+#             state,
+#             salt="meta-oauth",
+#             max_age=600
+#         )
+
+#         company_id = state_data["company_id"]
+
+#     except signing.BadSignature:
+#         return JsonResponse(
+#             {"error": "Invalid or expired state"},
+#             status=400
+#         )
+
+#     # Exchange code for access token
+#     try:
+#         response = requests.get(
+#             "https://graph.facebook.com/v24.0/oauth/access_token",
+#             params={
+#                 "client_id": settings.META_APP_ID,
+#                 "client_secret": settings.META_APP_SECRET,
+#                 "redirect_uri": settings.META_REDIRECT_URI,
+#                 "code": code,
+#             },
+#             timeout=30
+#         )
+
+#         data = response.json()
+
+#     except requests.RequestException as e:
+#         return JsonResponse(
+#             {"error": f"Meta connection failed: {str(e)}"},
+#             status=500
+#         )
+
+#     if "access_token" not in data:
+#         return JsonResponse(
+#             {
+#                 "error": "Failed to get Meta access token",
+#                 "details": data
+#             },
+#             status=400
+#         )
+
+#     access_token = data["access_token"]
+
+#     # Get Meta user
+#     me_response = requests.get(
+#         "https://graph.facebook.com/v24.0/me",
+#         params={
+#             "fields": "id,name",
+#             "access_token": access_token,
+#         },
+#         timeout=30
+#     )
+
+#     me_data = me_response.json()
+
+#     if "error" in me_data:
+#         return JsonResponse(
+#             {
+#                 "error": "Failed to get Meta user",
+#                 "details": me_data
+#             },
+#             status=400
+#         )
+
+#     # Get Ad Accounts
+#     ad_response = requests.get(
+#         "https://graph.facebook.com/v24.0/me/adaccounts",
+#         params={
+#             "fields": "id,name,account_id",
+#             "access_token": access_token,
+#         },
+#         timeout=30
+#     )
+
+#     ad_data = ad_response.json()
+
+#     if "error" in ad_data:
+#         return JsonResponse(
+#             {
+#                 "error": "Failed to get Ad Accounts",
+#                 "details": ad_data
+#             },
+#             status=400
+#         )
+
+#     return JsonResponse({
+#         "message": "Meta authorization successful",
+#         "company_id": company_id,
+#         "meta_user": me_data,
+#         "ad_accounts": ad_data.get("data", []),
+#     })
 @api_view(["GET"])
 def meta_callback(request):
-
+ 
     code = request.GET.get("code")
     state = request.GET.get("state")
-
+ 
+    frontend_url = settings.FRONTEND_URL.rstrip("/")
+    settings_page = f"{frontend_url}/settings/notifications"
+ 
     if not code:
-        return JsonResponse(
-            {"error": "Authorization code not received from Meta"},
-            status=400
-        )
-
+        return redirect(f"{settings_page}?meta=error&reason=no_code")
+ 
     if not state:
-        return JsonResponse(
-            {"error": "State not received"},
-            status=400
-        )
-
+        return redirect(f"{settings_page}?meta=error&reason=no_state")
+ 
     # Verify state
     try:
         state_data = signing.loads(
@@ -354,15 +467,17 @@ def meta_callback(request):
             salt="meta-oauth",
             max_age=600
         )
-
+ 
         company_id = state_data["company_id"]
-
+ 
     except signing.BadSignature:
-        return JsonResponse(
-            {"error": "Invalid or expired state"},
-            status=400
-        )
-
+        return redirect(f"{settings_page}?meta=error&reason=bad_state")
+ 
+    try:
+        company = Company.objects.get(id=company_id)
+    except Company.DoesNotExist:
+        return redirect(f"{settings_page}?meta=error&reason=company_not_found")
+ 
     # Exchange code for access token
     try:
         response = requests.get(
@@ -375,26 +490,17 @@ def meta_callback(request):
             },
             timeout=30
         )
-
+ 
         data = response.json()
-
-    except requests.RequestException as e:
-        return JsonResponse(
-            {"error": f"Meta connection failed: {str(e)}"},
-            status=500
-        )
-
+ 
+    except requests.RequestException:
+        return redirect(f"{settings_page}?meta=error&reason=token_exchange_failed")
+ 
     if "access_token" not in data:
-        return JsonResponse(
-            {
-                "error": "Failed to get Meta access token",
-                "details": data
-            },
-            status=400
-        )
-
+        return redirect(f"{settings_page}?meta=error&reason=no_access_token")
+ 
     access_token = data["access_token"]
-
+ 
     # Get Meta user
     me_response = requests.get(
         "https://graph.facebook.com/v24.0/me",
@@ -404,18 +510,12 @@ def meta_callback(request):
         },
         timeout=30
     )
-
+ 
     me_data = me_response.json()
-
+ 
     if "error" in me_data:
-        return JsonResponse(
-            {
-                "error": "Failed to get Meta user",
-                "details": me_data
-            },
-            status=400
-        )
-
+        return redirect(f"{settings_page}?meta=error&reason=meta_user_failed")
+ 
     # Get Ad Accounts
     ad_response = requests.get(
         "https://graph.facebook.com/v24.0/me/adaccounts",
@@ -425,25 +525,51 @@ def meta_callback(request):
         },
         timeout=30
     )
-
+ 
     ad_data = ad_response.json()
-
+ 
     if "error" in ad_data:
-        return JsonResponse(
-            {
-                "error": "Failed to get Ad Accounts",
-                "details": ad_data
-            },
-            status=400
-        )
-
+        return redirect(f"{settings_page}?meta=error&reason=ad_accounts_failed")
+ 
+    ad_accounts = ad_data.get("data", [])
+    # No account-picker UI exists yet, so default to the first ad account
+    # returned. Swap this for a real selection step once you build one.
+    first_ad_account_id = ad_accounts[0]["id"] if ad_accounts else None
+ 
+    # NOTE: business_id and page_id aren't fetched by this flow yet — that
+    # needs separate Graph API calls (e.g. /me/businesses, /me/accounts for
+    # pages) which this view doesn't make. Left null until that's built.
+    MetaIntegration.objects.update_or_create(
+        company=company,
+        defaults={
+            "meta_user_id": me_data.get("id"),
+            "access_token": access_token,
+            "ad_account_id": first_ad_account_id,
+            "assigned_staff": request.staff if hasattr(request, "staff") else None,
+            "is_active": True,
+        },
+    )
+ 
+    return redirect(f"{settings_page}?meta=connected")
+ 
+ 
+@api_view(["GET"])
+def meta_status(request):
+    integration = MetaIntegration.objects.filter(
+        company=request.company,
+        is_active=True,
+    ).first()
+ 
+    if not integration:
+        return JsonResponse({"connected": False})
+ 
     return JsonResponse({
-        "message": "Meta authorization successful",
-        "company_id": company_id,
-        "meta_user": me_data,
-        "ad_accounts": ad_data.get("data", []),
+        "connected": True,
+        "metaUserId": integration.meta_user_id,
+        "adAccountId": integration.ad_account_id,
+        "pageId": integration.page_id,
+        "connectedAt": integration.created_at.isoformat(),
     })
-
 
 
 @api_view(["GET", "POST"])

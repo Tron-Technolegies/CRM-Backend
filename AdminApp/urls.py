@@ -155,5 +155,5 @@ urlpatterns= [
     path('integrations/meta/connect/', views.meta_connect, name='meta-connect'),
     path('integrations/meta/callback/', views.meta_callback, name='meta-callback'),
     path('webhooks/meta/', views.meta_webhook, name='meta-webhook'),
-    path('integrations/meta/callback/', views.meta_callback, name='meta-callback'),
+    path('integrations/meta/status/', views.meta_status, name='meta-status'),
 ]
