@@ -1,3 +1,4 @@
+from urllib.parse import urlencode
 from venv import logger
 from django.core import signing
 from django.shortcuts import redirect
@@ -312,6 +313,7 @@ def accept_invitation(request):
 # ..............lead.......................
 @api_view(["GET"])
 def meta_connect(request):
+
     state = signing.dumps(
         {
             "company_id": request.company.id,
@@ -319,17 +321,22 @@ def meta_connect(request):
         salt="meta-oauth"
     )
 
+    params = {
+        "client_id": settings.META_APP_ID,
+        "redirect_uri": settings.META_REDIRECT_URI,
+        "config_id": settings.META_CONFIG_ID,
+        "state": state,
+        "response_type": "code",
+    }
+
     meta_url = (
-        "https://www.facebook.com/v24.0/dialog/oauth"
-        f"?client_id={settings.META_APP_ID}"
-        f"&redirect_uri={settings.META_REDIRECT_URI}"
-        f"&config_id={settings.META_CONFIG_ID}"
-        f"&state={state}"
-        "&response_type=code"
+        "https://www.facebook.com/v24.0/dialog/oauth?"
+        + urlencode(params)
     )
 
-    return redirect(meta_url)
-
+    return JsonResponse({
+        "auth_url": meta_url
+    })
 
 # @api_view(["GET"])
 # def meta_callback(request):
