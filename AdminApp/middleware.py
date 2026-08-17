@@ -19,7 +19,6 @@ class CompanyMiddleware:
             "/api/token/",
             "/api/token/refresh/",
             "/admin/",
-            "/api/admin/integrations/meta/connect/",
             "/api/admin/integrations/meta/callback/",
         ]
 
