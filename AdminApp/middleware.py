@@ -19,6 +19,7 @@ class CompanyMiddleware:
             "/api/token/",
             "/api/token/refresh/",
             "/admin/",
+            "/api/integrations/meta/connect/",
         ]
 
         if any(request.path.startswith(path) for path in public_paths):
