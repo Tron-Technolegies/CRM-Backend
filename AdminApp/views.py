@@ -568,33 +568,21 @@ def meta_status(request):
 
 
 @api_view(["GET", "POST"])
+@permission_classes([AllowAny])
+@authentication_classes([])
 def meta_webhook(request):
-
     if request.method == "GET":
         mode = request.GET.get("hub.mode")
-        verify_token = request.GET.get("hub.verify_token")
+        token = request.GET.get("hub.verify_token")
         challenge = request.GET.get("hub.challenge")
 
-        expected_token = os.getenv("META_WEBHOOK_VERIFY_TOKEN")
+        if mode == "subscribe" and token == settings.META_WEBHOOK_VERIFY_TOKEN:
+            return HttpResponse(challenge, content_type="text/plain")
+        return HttpResponse("Verification failed", status=403)
 
-        if mode == "subscribe" and verify_token == expected_token:
-            return JsonResponse(
-                int(challenge),
-                safe=False
-            )
+    # POST — actual webhook events, handle later
+    return HttpResponse(status=200)
 
-        return JsonResponse(
-            {"error": "Verification failed"},
-            status=403
-        )
-
-    if request.method == "POST":
-        print("Meta webhook received:", request.data)
-
-        return JsonResponse({
-            "message": "Meta webhook received"
-        })
-    
     
 
 @api_view(["POST"])

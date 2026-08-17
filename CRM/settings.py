@@ -28,6 +28,7 @@ META_APP_SECRET = os.getenv("META_APP_SECRET")
 META_CONFIG_ID = os.getenv("META_CONFIG_ID")
 META_REDIRECT_URI = os.getenv("META_REDIRECT_URI")
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
+META_WEBHOOK_VERIFY_TOKEN = os.getenv("META_WEBHOOK_VERIFY_TOKEN")
 
 
 # Quick-start development settings - unsuitable for production
