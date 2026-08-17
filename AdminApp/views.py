@@ -444,16 +444,21 @@ def meta_status(request):
         company=request.company,
         is_active=True,
     ).first()
- 
+
     if not integration:
-        return JsonResponse({"connected": False})
- 
+        return JsonResponse({
+            "connected": False,
+            "debug": "No MetaIntegration found"
+        })
+
     return JsonResponse({
         "connected": True,
         "metaUserId": integration.meta_user_id,
         "adAccountId": integration.ad_account_id,
         "pageId": integration.page_id,
-        "connectedAt": integration.created_at.isoformat(),
+        "hasPageAccessToken": bool(integration.page_access_token),
+        "hasAccessToken": bool(integration.access_token),
+        "hasAssignedStaff": bool(integration.assigned_staff),
     })
 
 
