@@ -1,3 +1,4 @@
+import os
 import traceback
 from urllib.parse import urlencode
 from venv import logger
@@ -565,11 +566,38 @@ def meta_status(request):
     })
 
 
+
 @api_view(["GET", "POST"])
 def meta_webhook(request):
-    return JsonResponse({
-        "message": "Meta webhook endpoint"
-    })
+
+    # Meta webhook verification
+    if request.method == "GET":
+        mode = request.GET.get("hub.mode")
+        verify_token = request.GET.get("hub.verify_token")
+        challenge = request.GET.get("hub.challenge")
+
+        expected_token = os.getenv("META_WEBHOOK_VERIFY_TOKEN")
+
+        if mode == "subscribe" and verify_token == expected_token:
+            return JsonResponse(
+                int(challenge),
+                safe=False
+            )
+
+        return JsonResponse(
+            {"error": "Verification failed"},
+            status=403
+        )
+
+    # Meta webhook events
+    if request.method == "POST":
+        print("Meta webhook received:", request.data)
+
+        return JsonResponse({
+            "message": "Meta webhook received"
+        })
+
+    
 
 @api_view(["POST"])
 def add_lead(request):
