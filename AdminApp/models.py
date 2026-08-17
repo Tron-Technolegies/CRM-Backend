@@ -93,6 +93,8 @@ class Lead(models.Model):
     lead_description = models.TextField(blank=True, null=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="new")
     expected_closing_date = models.DateField(null=True, blank=True)
+
+    meta_lead_id = models.CharField(max_length=255, blank=True, null=True, unique=True)
     
     # converted_customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name="originating_leads")
     converted_at = models.DateTimeField(blank=True, null=True)
@@ -975,6 +977,7 @@ class MetaIntegration(models.Model):
     meta_user_id = models.CharField(max_length=255, blank=True, null=True)
 
     access_token = models.TextField()
+    page_access_token = models.TextField(blank=True, null=True)
 
     business_id = models.CharField(max_length=255, blank=True, null=True)
     ad_account_id = models.CharField(max_length=255, blank=True, null=True)

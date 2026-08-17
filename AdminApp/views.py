@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import os
 import traceback
 from urllib.parse import urlencode
@@ -6,7 +8,7 @@ from django.core import signing
 from django.shortcuts import redirect
 
 from django.tasks import task
-from django.utils import timezone
+from django.utils import json, timezone
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, render
 import requests
@@ -319,6 +321,7 @@ def meta_connect(request):
     state = signing.dumps(
         {
             "company_id": request.company.id,
+            "staff_id": request.staff.id,
         },
         salt="meta-oauth"
     )
@@ -340,120 +343,8 @@ def meta_connect(request):
         "auth_url": meta_url
     })
 
-# @api_view(["GET"])
-# def meta_callback(request):
 
-#     code = request.GET.get("code")
-#     state = request.GET.get("state")
 
-#     if not code:
-#         return JsonResponse(
-#             {"error": "Authorization code not received from Meta"},
-#             status=400
-#         )
-
-#     if not state:
-#         return JsonResponse(
-#             {"error": "State not received"},
-#             status=400
-#         )
-
-#     # Verify state
-#     try:
-#         state_data = signing.loads(
-#             state,
-#             salt="meta-oauth",
-#             max_age=600
-#         )
-
-#         company_id = state_data["company_id"]
-
-#     except signing.BadSignature:
-#         return JsonResponse(
-#             {"error": "Invalid or expired state"},
-#             status=400
-#         )
-
-#     # Exchange code for access token
-#     try:
-#         response = requests.get(
-#             "https://graph.facebook.com/v24.0/oauth/access_token",
-#             params={
-#                 "client_id": settings.META_APP_ID,
-#                 "client_secret": settings.META_APP_SECRET,
-#                 "redirect_uri": settings.META_REDIRECT_URI,
-#                 "code": code,
-#             },
-#             timeout=30
-#         )
-
-#         data = response.json()
-
-#     except requests.RequestException as e:
-#         return JsonResponse(
-#             {"error": f"Meta connection failed: {str(e)}"},
-#             status=500
-#         )
-
-#     if "access_token" not in data:
-#         return JsonResponse(
-#             {
-#                 "error": "Failed to get Meta access token",
-#                 "details": data
-#             },
-#             status=400
-#         )
-
-#     access_token = data["access_token"]
-
-#     # Get Meta user
-#     me_response = requests.get(
-#         "https://graph.facebook.com/v24.0/me",
-#         params={
-#             "fields": "id,name",
-#             "access_token": access_token,
-#         },
-#         timeout=30
-#     )
-
-#     me_data = me_response.json()
-
-#     if "error" in me_data:
-#         return JsonResponse(
-#             {
-#                 "error": "Failed to get Meta user",
-#                 "details": me_data
-#             },
-#             status=400
-#         )
-
-#     # Get Ad Accounts
-#     ad_response = requests.get(
-#         "https://graph.facebook.com/v24.0/me/adaccounts",
-#         params={
-#             "fields": "id,name,account_id",
-#             "access_token": access_token,
-#         },
-#         timeout=30
-#     )
-
-#     ad_data = ad_response.json()
-
-#     if "error" in ad_data:
-#         return JsonResponse(
-#             {
-#                 "error": "Failed to get Ad Accounts",
-#                 "details": ad_data
-#             },
-#             status=400
-#         )
-
-#     return JsonResponse({
-#         "message": "Meta authorization successful",
-#         "company_id": company_id,
-#         "meta_user": me_data,
-#         "ad_accounts": ad_data.get("data", []),
-#     })
 @api_view(["GET"])
 @permission_classes([AllowAny])
 @authentication_classes([])
@@ -571,17 +462,44 @@ def meta_status(request):
 @permission_classes([AllowAny])
 @authentication_classes([])
 def meta_webhook(request):
+
     if request.method == "GET":
         mode = request.GET.get("hub.mode")
         token = request.GET.get("hub.verify_token")
         challenge = request.GET.get("hub.challenge")
 
         if mode == "subscribe" and token == settings.META_WEBHOOK_VERIFY_TOKEN:
-            return HttpResponse(challenge, content_type="text/plain")
-        return HttpResponse("Verification failed", status=403)
+            return HttpResponse(challenge, content_type="text/plain", status=200)
 
-    # POST — actual webhook events, handle later
-    return HttpResponse(status=200)
+        logger.warning("Meta webhook verification failed: mode=%s token_match=%s",
+                        mode, token == settings.META_WEBHOOK_VERIFY_TOKEN)
+        return HttpResponse("Verification token mismatch", status=403)
+
+    if request.method == "POST":
+        signature = request.headers.get("X-Hub-Signature-256", "")
+        if settings.META_APP_SECRET:
+            expected = "sha256=" + hmac.new(
+                key=settings.META_APP_SECRET.encode("utf-8"),
+                msg=request.body,
+                digestmod=hashlib.sha256,
+            ).hexdigest()
+
+            if not hmac.compare_digest(expected, signature):
+                logger.warning("Meta webhook signature mismatch")
+                return HttpResponse(status=403)
+
+        try:
+            payload = json.loads(request.body.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            logger.warning("Meta webhook: could not parse JSON body")
+            return HttpResponse(status=400)
+
+        logger.info("Meta webhook event received: %s", payload)
+
+        
+        return HttpResponse(status=200)
+
+    return HttpResponse(status=405)
 
     
 
