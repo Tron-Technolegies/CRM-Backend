@@ -570,7 +570,6 @@ def meta_status(request):
 @api_view(["GET", "POST"])
 def meta_webhook(request):
 
-    # Meta webhook verification
     if request.method == "GET":
         mode = request.GET.get("hub.mode")
         verify_token = request.GET.get("hub.verify_token")
@@ -589,14 +588,13 @@ def meta_webhook(request):
             status=403
         )
 
-    # Meta webhook events
     if request.method == "POST":
         print("Meta webhook received:", request.data)
 
         return JsonResponse({
             "message": "Meta webhook received"
         })
-
+    
     
 
 @api_view(["POST"])
