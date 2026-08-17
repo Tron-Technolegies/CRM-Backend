@@ -1,3 +1,4 @@
+import traceback
 from urllib.parse import urlencode
 from venv import logger
 from django.core import signing
@@ -456,110 +457,93 @@ def meta_connect(request):
 @permission_classes([AllowAny])
 @authentication_classes([])
 def meta_callback(request):
- 
-    code = request.GET.get("code")
-    state = request.GET.get("state")
- 
-    frontend_url = settings.FRONTEND_URL.rstrip("/")
-    settings_page = f"{frontend_url}/settings/notifications"
- 
-    if not code:
-        return redirect(f"{settings_page}?meta=error&reason=no_code")
- 
-    if not state:
-        return redirect(f"{settings_page}?meta=error&reason=no_state")
- 
-    # Verify state
     try:
-        state_data = signing.loads(
-            state,
-            salt="meta-oauth",
-            max_age=600
-        )
- 
-        company_id = state_data["company_id"]
- 
-    except signing.BadSignature:
-        return redirect(f"{settings_page}?meta=error&reason=bad_state")
- 
-    try:
-        company = Company.objects.get(id=company_id)
-    except Company.DoesNotExist:
-        return redirect(f"{settings_page}?meta=error&reason=company_not_found")
- 
-    # Exchange code for access token
-    try:
-        response = requests.get(
-            "https://graph.facebook.com/v24.0/oauth/access_token",
-            params={
-                "client_id": settings.META_APP_ID,
-                "client_secret": settings.META_APP_SECRET,
-                "redirect_uri": settings.META_REDIRECT_URI,
-                "code": code,
-            },
+        code = request.GET.get("code")
+        state = request.GET.get("state")
+
+        frontend_url = settings.FRONTEND_URL.rstrip("/")
+        settings_page = f"{frontend_url}/settings/notifications"
+
+        if not code:
+            return redirect(f"{settings_page}?meta=error&reason=no_code")
+
+        if not state:
+            return redirect(f"{settings_page}?meta=error&reason=no_state")
+
+        try:
+            state_data = signing.loads(state, salt="meta-oauth", max_age=600)
+            company_id = state_data["company_id"]
+        except signing.BadSignature:
+            return redirect(f"{settings_page}?meta=error&reason=bad_state")
+
+        try:
+            company = Company.objects.get(id=company_id)
+        except Company.DoesNotExist:
+            return redirect(f"{settings_page}?meta=error&reason=company_not_found")
+
+        try:
+            response = requests.get(
+                "https://graph.facebook.com/v24.0/oauth/access_token",
+                params={
+                    "client_id": settings.META_APP_ID,
+                    "client_secret": settings.META_APP_SECRET,
+                    "redirect_uri": settings.META_REDIRECT_URI,
+                    "code": code,
+                },
+                timeout=30
+            )
+            data = response.json()
+        except requests.RequestException:
+            return redirect(f"{settings_page}?meta=error&reason=token_exchange_failed")
+
+        if "access_token" not in data:
+            print("META TOKEN EXCHANGE RESPONSE:", data)
+            return redirect(f"{settings_page}?meta=error&reason=no_access_token")
+
+        access_token = data["access_token"]
+
+        me_response = requests.get(
+            "https://graph.facebook.com/v24.0/me",
+            params={"fields": "id,name", "access_token": access_token},
             timeout=30
         )
- 
-        data = response.json()
- 
-    except requests.RequestException:
-        return redirect(f"{settings_page}?meta=error&reason=token_exchange_failed")
- 
-    if "access_token" not in data:
-        return redirect(f"{settings_page}?meta=error&reason=no_access_token")
- 
-    access_token = data["access_token"]
- 
-    # Get Meta user
-    me_response = requests.get(
-        "https://graph.facebook.com/v24.0/me",
-        params={
-            "fields": "id,name",
-            "access_token": access_token,
-        },
-        timeout=30
-    )
- 
-    me_data = me_response.json()
- 
-    if "error" in me_data:
-        return redirect(f"{settings_page}?meta=error&reason=meta_user_failed")
- 
-    # Get Ad Accounts
-    ad_response = requests.get(
-        "https://graph.facebook.com/v24.0/me/adaccounts",
-        params={
-            "fields": "id,name,account_id",
-            "access_token": access_token,
-        },
-        timeout=30
-    )
- 
-    ad_data = ad_response.json()
- 
-    if "error" in ad_data:
-        return redirect(f"{settings_page}?meta=error&reason=ad_accounts_failed")
- 
-    ad_accounts = ad_data.get("data", [])
-    # No account-picker UI exists yet, so default to the first ad account
-    # returned. Swap this for a real selection step once you build one.
-    first_ad_account_id = ad_accounts[0]["id"] if ad_accounts else None
- 
-    # NOTE: business_id and page_id aren't fetched by this flow yet — that
-    # needs separate Graph API calls (e.g. /me/businesses, /me/accounts for
-    # pages) which this view doesn't make. Left null until that's built.
-    MetaIntegration.objects.update_or_create(
-        company=company,
-        defaults={
-            "meta_user_id": me_data.get("id"),
-            "access_token": access_token,
-            "ad_account_id": first_ad_account_id,
-            "assigned_staff": request.staff if hasattr(request, "staff") else None,
-            "is_active": True,
-        },
-    )
- 
-    return redirect(f"{settings_page}?meta=connected")
+        me_data = me_response.json()
+
+        if "error" in me_data:
+            print("META USER FETCH ERROR:", me_data)
+            return redirect(f"{settings_page}?meta=error&reason=meta_user_failed")
+
+        ad_response = requests.get(
+            "https://graph.facebook.com/v24.0/me/adaccounts",
+            params={"fields": "id,name,account_id", "access_token": access_token},
+            timeout=30
+        )
+        ad_data = ad_response.json()
+
+        if "error" in ad_data:
+            print("META AD ACCOUNTS ERROR:", ad_data)
+            return redirect(f"{settings_page}?meta=error&reason=ad_accounts_failed")
+
+        ad_accounts = ad_data.get("data", [])
+        first_ad_account_id = ad_accounts[0]["id"] if ad_accounts else None
+
+        MetaIntegration.objects.update_or_create(
+            company=company,
+            defaults={
+                "meta_user_id": me_data.get("id"),
+                "access_token": access_token,
+                "ad_account_id": first_ad_account_id,
+                "assigned_staff": request.staff if hasattr(request, "staff") else None,
+                "is_active": True,
+            },
+        )
+
+        return redirect(f"{settings_page}?meta=connected")
+
+    except Exception:
+        print("META CALLBACK CRASHED:")
+        print(traceback.format_exc())
+        return redirect(f"{settings_page}?meta=error&reason=unhandled_exception")
  
  
 @api_view(["GET"])
