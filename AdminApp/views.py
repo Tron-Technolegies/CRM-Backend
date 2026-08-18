@@ -345,6 +345,27 @@ def meta_connect(request):
 
 
 
+@api_view(["POST"])
+def meta_disconnect(request):
+    integration = MetaIntegration.objects.filter(
+        company=request.company,
+        is_active=True
+    ).first()
+
+    if not integration:
+        return JsonResponse({
+            "message": "Meta is not connected"
+        }, status=404)
+
+    integration.is_active = False
+    integration.save(update_fields=["is_active", "updated_at"])
+
+    return JsonResponse({
+        "message": "Meta disconnected successfully"
+    })
+
+
+
 @api_view(["GET"])
 @permission_classes([AllowAny])
 @authentication_classes([])
