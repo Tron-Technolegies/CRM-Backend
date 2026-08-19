@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import logging
 import os
 import traceback
 from urllib.parse import urlencode
@@ -42,6 +43,7 @@ from AdminApp.services import create_lead_for_company, get_related_label, notify
 
 from .models import MetaIntegration
 
+logger = logging.getLogger(__name__)
 
 # .............. authentication..............
 @api_view(["POST"])
@@ -317,7 +319,6 @@ def accept_invitation(request):
 # ..............lead.......................
 @api_view(["GET"])
 def meta_connect(request):
-
     state = signing.dumps(
         {
             "company_id": request.company.id,
@@ -334,15 +335,9 @@ def meta_connect(request):
         "response_type": "code",
     }
 
-    meta_url = (
-        "https://www.facebook.com/v24.0/dialog/oauth?"
-        + urlencode(params)
-    )
+    meta_url = "https://www.facebook.com/v24.0/dialog/oauth?" + urlencode(params)
 
-    return JsonResponse({
-        "auth_url": meta_url
-    })
-
+    return JsonResponse({"auth_url": meta_url})
 
 
 @api_view(["POST"])
@@ -353,29 +348,27 @@ def meta_disconnect(request):
     ).first()
 
     if not integration:
-        return JsonResponse({
-            "message": "Meta is not connected"
-        }, status=404)
+        return JsonResponse({"message": "Meta is not connected"}, status=404)
 
     integration.is_active = False
     integration.save(update_fields=["is_active", "updated_at"])
 
-    return JsonResponse({
-        "message": "Meta disconnected successfully"
-    })
-
+    return JsonResponse({"message": "Meta disconnected successfully"})
 
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 @authentication_classes([])
 def meta_callback(request):
-    try:
-        code = request.GET.get("code")
-        state = request.GET.get("state")
+    # Safe fallback in case settings.FRONTEND_URL itself is broken
+    settings_page = "/settings/notifications"
 
+    try:
         frontend_url = settings.FRONTEND_URL.rstrip("/")
         settings_page = f"{frontend_url}/settings/notifications"
+
+        code = request.GET.get("code")
+        state = request.GET.get("state")
 
         if not code:
             return redirect(f"{settings_page}?meta=error&reason=no_code")
@@ -383,19 +376,35 @@ def meta_callback(request):
         if not state:
             return redirect(f"{settings_page}?meta=error&reason=no_state")
 
+        # Decode state
         try:
             state_data = signing.loads(state, salt="meta-oauth", max_age=600)
             company_id = state_data["company_id"]
-        except signing.BadSignature:
+            staff_id = state_data["staff_id"]
+        except (signing.BadSignature, signing.SignatureExpired, KeyError):
+            logger.warning("Meta OAuth state validation failed")
             return redirect(f"{settings_page}?meta=error&reason=bad_state")
 
+        # Get company
         try:
             company = Company.objects.get(id=company_id)
         except Company.DoesNotExist:
+            logger.error("Meta callback: company not found: %s", company_id)
             return redirect(f"{settings_page}?meta=error&reason=company_not_found")
 
+        # Get staff
         try:
-            response = requests.get(
+            staff = Staff.objects.get(id=staff_id, company=company)
+        except Staff.DoesNotExist:
+            logger.warning(
+                "Meta callback: staff not found. staff_id=%s company_id=%s",
+                staff_id, company_id
+            )
+            staff = None
+
+        # Exchange code for access token
+        try:
+            token_response = requests.get(
                 "https://graph.facebook.com/v24.0/oauth/access_token",
                 params={
                     "client_id": settings.META_APP_ID,
@@ -405,60 +414,104 @@ def meta_callback(request):
                 },
                 timeout=30
             )
-            data = response.json()
+            token_data = token_response.json()
         except requests.RequestException:
+            logger.exception("Meta token exchange request failed")
             return redirect(f"{settings_page}?meta=error&reason=token_exchange_failed")
 
-        if "access_token" not in data:
-            print("META TOKEN EXCHANGE RESPONSE:", data)
+        if "access_token" not in token_data:
+            logger.error("META TOKEN EXCHANGE RESPONSE: %s", token_data)
             return redirect(f"{settings_page}?meta=error&reason=no_access_token")
 
-        access_token = data["access_token"]
+        access_token = token_data["access_token"]
 
-        me_response = requests.get(
-            "https://graph.facebook.com/v24.0/me",
-            params={"fields": "id,name", "access_token": access_token},
-            timeout=30
-        )
-        me_data = me_response.json()
-
-        if "error" in me_data:
-            print("META USER FETCH ERROR:", me_data)
+        # Get Meta user
+        try:
+            me_response = requests.get(
+                "https://graph.facebook.com/v24.0/me",
+                params={"fields": "id,name", "access_token": access_token},
+                timeout=30
+            )
+            me_data = me_response.json()
+        except requests.RequestException:
+            logger.exception("Meta user request failed")
             return redirect(f"{settings_page}?meta=error&reason=meta_user_failed")
 
-        ad_response = requests.get(
-            "https://graph.facebook.com/v24.0/me/adaccounts",
-            params={"fields": "id,name,account_id", "access_token": access_token},
-            timeout=30
-        )
-        ad_data = ad_response.json()
+        if "error" in me_data:
+            logger.error("META USER FETCH ERROR: %s", me_data)
+            return redirect(f"{settings_page}?meta=error&reason=meta_user_failed")
+
+        meta_user_id = me_data.get("id")
+
+        # Get ad accounts
+        try:
+            ad_response = requests.get(
+                "https://graph.facebook.com/v24.0/me/adaccounts",
+                params={"fields": "id,name,account_id", "access_token": access_token},
+                timeout=30
+            )
+            ad_data = ad_response.json()
+        except requests.RequestException:
+            logger.exception("Meta ad account request failed")
+            return redirect(f"{settings_page}?meta=error&reason=ad_accounts_failed")
 
         if "error" in ad_data:
-            print("META AD ACCOUNTS ERROR:", ad_data)
+            logger.error("META AD ACCOUNTS ERROR: %s", ad_data)
             return redirect(f"{settings_page}?meta=error&reason=ad_accounts_failed")
 
         ad_accounts = ad_data.get("data", [])
-        first_ad_account_id = ad_accounts[0]["id"] if ad_accounts else None
+        first_ad_account_id = ad_accounts[0].get("id") if ad_accounts else None
+        logger.info("Meta Ad Accounts found: %s", len(ad_accounts))
 
-        MetaIntegration.objects.update_or_create(
+        # Get Facebook pages
+        try:
+            page_response = requests.get(
+                "https://graph.facebook.com/v24.0/me/accounts",
+                params={"fields": "id,name,access_token", "access_token": access_token},
+                timeout=30
+            )
+            page_data = page_response.json()
+        except requests.RequestException:
+            logger.exception("Meta pages request failed")
+            return redirect(f"{settings_page}?meta=error&reason=pages_failed")
+
+        if "error" in page_data:
+            logger.error("META PAGES ERROR: %s", page_data)
+            return redirect(f"{settings_page}?meta=error&reason=pages_failed")
+
+        pages = page_data.get("data", [])
+        first_page_id = pages[0].get("id") if pages else None
+        page_access_token = pages[0].get("access_token") if pages else None
+        logger.info("Meta Pages found: %s", len(pages))
+
+        # Save integration
+        integration, created = MetaIntegration.objects.update_or_create(
             company=company,
             defaults={
-                "meta_user_id": me_data.get("id"),
+                "meta_user_id": meta_user_id,
                 "access_token": access_token,
                 "ad_account_id": first_ad_account_id,
-                "assigned_staff": request.staff if hasattr(request, "staff") else None,
+                "page_id": first_page_id,
+                "page_access_token": page_access_token,
+                "assigned_staff": staff,
                 "is_active": True,
-            },
+            }
+        )
+
+        logger.info(
+            "Meta integration saved successfully. company=%s created=%s "
+            "meta_user_id=%s ad_account_id=%s page_id=%s staff_id=%s",
+            company.id, created, meta_user_id, first_ad_account_id,
+            first_page_id, staff.id if staff else None
         )
 
         return redirect(f"{settings_page}?meta=connected")
 
     except Exception:
-        print("META CALLBACK CRASHED:")
-        print(traceback.format_exc())
+        logger.exception("META CALLBACK CRASHED")
         return redirect(f"{settings_page}?meta=error&reason=unhandled_exception")
- 
- 
+
+
 @api_view(["GET"])
 def meta_status(request):
     integration = MetaIntegration.objects.filter(
@@ -469,7 +522,12 @@ def meta_status(request):
     if not integration:
         return JsonResponse({
             "connected": False,
-            "debug": "No MetaIntegration found"
+            "metaUserId": None,
+            "adAccountId": None,
+            "pageId": None,
+            "hasPageAccessToken": False,
+            "hasAccessToken": False,
+            "hasAssignedStaff": False,
         })
 
     return JsonResponse({
@@ -483,26 +541,28 @@ def meta_status(request):
     })
 
 
-
 @api_view(["GET", "POST"])
 @permission_classes([AllowAny])
 @authentication_classes([])
 def meta_webhook(request):
-
     if request.method == "GET":
         mode = request.GET.get("hub.mode")
         token = request.GET.get("hub.verify_token")
         challenge = request.GET.get("hub.challenge")
 
         if mode == "subscribe" and token == settings.META_WEBHOOK_VERIFY_TOKEN:
+            logger.info("Meta webhook verified successfully")
             return HttpResponse(challenge, content_type="text/plain", status=200)
 
-        logger.warning("Meta webhook verification failed: mode=%s token_match=%s",
-                        mode, token == settings.META_WEBHOOK_VERIFY_TOKEN)
+        logger.warning(
+            "Meta webhook verification failed: mode=%s token_match=%s",
+            mode, token == settings.META_WEBHOOK_VERIFY_TOKEN
+        )
         return HttpResponse("Verification token mismatch", status=403)
 
     if request.method == "POST":
         signature = request.headers.get("X-Hub-Signature-256", "")
+
         if settings.META_APP_SECRET:
             expected = "sha256=" + hmac.new(
                 key=settings.META_APP_SECRET.encode("utf-8"),
@@ -522,12 +582,13 @@ def meta_webhook(request):
 
         logger.info("Meta webhook event received: %s", payload)
 
-        
+        # TODO: process Meta Lead Ads events here
+
         return HttpResponse(status=200)
 
     return HttpResponse(status=405)
 
-    
+
 
 @api_view(["POST"])
 def add_lead(request):
