@@ -360,7 +360,7 @@ def meta_disconnect(request):
 @permission_classes([AllowAny])
 @authentication_classes([])
 def meta_callback(request):
-    # Safe fallback in case settings.FRONTEND_URL itself is broken
+    # Safe fallback
     settings_page = "/settings/notifications"
 
     try:
@@ -424,6 +424,7 @@ def meta_callback(request):
             return redirect(f"{settings_page}?meta=error&reason=no_access_token")
 
         access_token = token_data["access_token"]
+        logger.info("Meta access token received successfully")
 
         # Get Meta user
         try:
@@ -436,6 +437,8 @@ def meta_callback(request):
         except requests.RequestException:
             logger.exception("Meta user request failed")
             return redirect(f"{settings_page}?meta=error&reason=meta_user_failed")
+
+        logger.info("META USER RESPONSE: %s", me_data)
 
         if "error" in me_data:
             logger.error("META USER FETCH ERROR: %s", me_data)
@@ -454,6 +457,8 @@ def meta_callback(request):
         except requests.RequestException:
             logger.exception("Meta ad account request failed")
             return redirect(f"{settings_page}?meta=error&reason=ad_accounts_failed")
+
+        logger.warning("META AD ACCOUNTS RESPONSE: %s", ad_data)
 
         if "error" in ad_data:
             logger.error("META AD ACCOUNTS ERROR: %s", ad_data)
@@ -474,6 +479,8 @@ def meta_callback(request):
         except requests.RequestException:
             logger.exception("Meta pages request failed")
             return redirect(f"{settings_page}?meta=error&reason=pages_failed")
+
+        logger.warning("META PAGES RESPONSE: %s", page_data)
 
         if "error" in page_data:
             logger.error("META PAGES ERROR: %s", page_data)
@@ -511,6 +518,7 @@ def meta_callback(request):
         logger.exception("META CALLBACK CRASHED")
         return redirect(f"{settings_page}?meta=error&reason=unhandled_exception")
 
+    
 
 @api_view(["GET"])
 def meta_status(request):
