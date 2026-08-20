@@ -34,11 +34,13 @@ python-decouple==3.8
 python-dotenv==1.2.2
 reportlab==4.5.1
 requests==2.34.2
+resend==2.37.0
 six==1.17.0
 sqlparse==0.5.5
 svglib==2.1.0
 tinycss2==1.5.1
 tinyhtml5==2.1.0
+typing_extensions==4.16.0
 tzdata==2026.2
 tzlocal==5.4.4
 uritools==6.1.3
