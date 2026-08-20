@@ -1444,10 +1444,7 @@ def add_staff(request):
     except Exception as e:
         return HttpResponse(str(e), status=500)
 
-    invite_link = (
-        f"https://tron-crm.netlify.app/staff/signup/"
-        f"?token={staff.invitation_token}"
-    )
+    invite_link = "https://tron-crm.netlify.app/login"
 
     subject = "You're invited to join CRM"
 
