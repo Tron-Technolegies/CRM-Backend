@@ -20,6 +20,7 @@ from django.db.models.functions import TruncWeek
 from django.db.models import Count
 from django.db import transaction
 
+from AdminApp.email_utils import send_invite_email
 from AdminApp.models import Accounts, Address, Call, Case, CaseSolution, Company, Customer, Deal, Invoice, InvoiceItem, Lead, Meeting, PicklistOption, PriceBook, PriceBookItem, Product, PurchaseOrder, PurchaseOrderItem, QuoteProduct, Quotes, SalesOrder, SalesOrderItem, Service, Staff, Task, Vendor
 
 from django.contrib.auth import authenticate
@@ -1417,15 +1418,6 @@ def add_staff(request):
     role = request.data.get("role")
     department = request.data.get("department")
 
-    print("========== ADD STAFF ==========")
-    print("FULL NAME:", repr(full_name))
-    print("EMAIL:", repr(email))
-    print("ROLE:", repr(role))
-    print("DEPARTMENT:", repr(department))
-    print("COMPANY:", request.company)
-    print("COMPANY ID:", request.company.id)
-    print("===============================")
-
     if not full_name or not email or not role:
         return HttpResponse(
             "Full name, email and role are mandatory fields",
@@ -1434,10 +1426,6 @@ def add_staff(request):
 
     existing_staff = Staff.objects.filter(email__iexact=email)
 
-    print("EXISTING STAFF:", list(
-        existing_staff.values("id", "email", "company_id")
-    ))
-
     if existing_staff.exists():
         return HttpResponse(
             "Email already exists",
@@ -1445,51 +1433,42 @@ def add_staff(request):
         )
 
     try:
-
         staff = Staff.objects.create(
-
             company=request.company,
             full_name=full_name,
             email=email,
             role=role,
             department=department,
             is_invited=True,
-
         )
-
-        invite_link = (
-            f"http://localhost:5173/staff/signup/"
-            f"?token={staff.invitation_token}"
-        )
-
-        subject = "You're invited to join CRM"
-
-        message = f"""
-Hello {staff.full_name},
-
-You have been invited to join {request.company.name}.
-
-Role : {staff.role}
-
-Click the link below to create your account.
-
-{invite_link}
-
-Thank you.
-"""
-
-        send_mail(
-            subject,
-            message,
-            settings.DEFAULT_FROM_EMAIL,
-            [staff.email],
-            fail_silently=False,
-        )
-
-        return HttpResponse( "Invitation sent successfully.", status=201)
-
     except Exception as e:
-        return HttpResponse( str(e), status=500)
+        return HttpResponse(str(e), status=500)
+
+    invite_link = (
+        f"https://tron-crm.netlify.app/staff/signup/"
+        f"?token={staff.invitation_token}"
+    )
+
+    subject = "You're invited to join CRM"
+
+    html_content = f"""
+    <p>Hello {staff.full_name},</p>
+    <p>You have been invited to join {request.company.name}.</p>
+    <p><b>Role:</b> {staff.role}</p>
+    <p>Click the link below to create your account.</p>
+    <p><a href="{invite_link}">{invite_link}</a></p>
+    <p>Thank you.</p>
+    """
+
+    try:
+        send_invite_email(staff.email, subject, html_content)
+    except Exception as e:
+        return HttpResponse(
+            f"Staff created, but invite email failed to send: {str(e)}",
+            status=207,
+        )
+
+    return HttpResponse("Invitation sent successfully.", status=201)
     
 
 
