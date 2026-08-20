@@ -1417,13 +1417,28 @@ def add_staff(request):
     role = request.data.get("role")
     department = request.data.get("department")
 
+    print("========== ADD STAFF ==========")
+    print("FULL NAME:", repr(full_name))
+    print("EMAIL:", repr(email))
+    print("ROLE:", repr(role))
+    print("DEPARTMENT:", repr(department))
+    print("COMPANY:", request.company)
+    print("COMPANY ID:", request.company.id)
+    print("===============================")
+
     if not full_name or not email or not role:
         return HttpResponse(
             "Full name, email and role are mandatory fields",
             status=400,
         )
 
-    if Staff.objects.filter(email=email).exists():
+    existing_staff = Staff.objects.filter(email__iexact=email)
+
+    print("EXISTING STAFF:", list(
+        existing_staff.values("id", "email", "company_id")
+    ))
+
+    if existing_staff.exists():
         return HttpResponse(
             "Email already exists",
             status=400
