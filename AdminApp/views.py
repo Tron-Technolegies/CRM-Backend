@@ -1644,6 +1644,179 @@ def get_lead_to_customer_prefill(request, lead_id):
 
 
 
+# @api_view(["POST"])
+# def convert_lead(request, lead_id):
+#     try:
+#         lead = Lead.objects.get(
+#             id=lead_id,
+#             company=request.company
+#         )
+#     except Lead.DoesNotExist:
+#         return HttpResponse("Lead not found", status=404)
+
+#     if lead.status == "converted":
+#         return HttpResponse("Lead already converted", status=400)
+
+#     create_customer = request.data.get("create_customer", False)
+#     create_account = request.data.get("create_account", False)
+#     create_deal = request.data.get("create_deal", False)
+
+#     customer = None
+#     account = None
+#     deal = None
+
+#     # ----------------------------
+#     # CUSTOMER
+#     # ----------------------------
+
+#     if create_customer:
+
+#         customer = Customer.objects.filter(
+#             lead=lead,
+#             company=request.company
+#         ).first()
+
+#         if customer is None:
+#             customer = Customer.objects.create(
+#                 company=request.company,
+#                 lead=lead,
+
+#                 company_name=request.data.get(
+#                     "company_name",
+#                     lead.company_name,
+#                 ),
+
+#                 contact_name=request.data.get(
+#                     "contact_name",
+#                     lead.full_name,
+#                 ),
+
+#                 phone_number=request.data.get(
+#                     "phone_number",
+#                     lead.phone_number,
+#                 ),
+
+#                 email=request.data.get(
+#                     "email",
+#                     lead.email,
+#                 ),
+
+#                 industry=request.data.get("industry", ""),
+#             )
+
+#     # ----------------------------
+#     # ACCOUNT
+#     # ----------------------------
+
+#     if create_account:
+
+#         account = Accounts.objects.filter(
+#             company=request.company,
+#             account_name=lead.company_name,
+#         ).first()
+
+#         if account is None:
+#             account = Accounts.objects.create(
+#                 company=request.company,
+
+#                 account_name=request.data.get(
+#                     "company_name",
+#                     lead.company_name,
+#                 ),
+
+#                 assigned_to=lead.assigned_to,
+
+#                 phone_number=request.data.get(
+#                     "phone_number",
+#                     lead.phone_number,
+#                 ),
+
+#                 website=request.data.get(
+#                     "website",
+#                     "",
+#                 ),
+
+#                 industry=request.data.get(
+#                     "industry",
+#                     "",
+#                 ),
+#             )
+
+#     # ----------------------------
+#     # DEAL
+#     # ----------------------------
+
+#     if create_deal:
+
+#         related_type = request.data.get("related_type")
+
+#         deal_kwargs = {
+#             "company": request.company,
+#             "lead": lead,
+#             "deal_name": request.data.get("deal_name", f"{lead.company_name} Deal"),
+#             "deal_amount": request.data.get("deal_amount") or 0,
+#             "stage": request.data.get("stage") or "Proposal",
+#             "assigned_to_id": request.data.get("assigned_to") or None,
+#             "expected_close_date": request.data.get("expected_closing_date") or None,
+#             "deal_source": request.data.get("deal_source") or "",
+#             "priority": request.data.get("priority") or "Medium",
+#             "deal_description": request.data.get("description") or "",
+#         }
+
+#         if related_type == "customer":
+
+#             if customer is None:
+#                 customer = Customer.objects.create(
+#                     company=request.company,
+#                     lead=lead,
+#                     company_name=lead.company_name,
+#                     contact_name=lead.full_name,
+#                     phone_number=lead.phone_number,
+#                     email=lead.email,
+#                     industry="",
+#                 )
+
+#             deal = Deal.objects.create(
+#                 customer=customer,
+#                 account=None,
+#                 **deal_kwargs,
+#             )
+
+#         elif related_type == "account":
+
+#             if account is None:
+#                 account = Accounts.objects.create(
+#                     company=request.company,
+#                     account_name=lead.company_name,
+#                     assigned_to=lead.assigned_to,
+#                     phone_number=lead.phone_number,
+#                     website="",
+#                     industry="",
+#                 )
+
+#             deal = Deal.objects.create(
+#                 customer=None,
+#                 account=account,
+#                 **deal_kwargs,
+#             )
+
+#     # ----------------------------
+#     # UPDATE LEAD
+#     # ----------------------------
+
+#     lead.status = "converted"
+#     lead.converted_at = timezone.now()
+#     lead.save()
+
+#     return JsonResponse({
+#         "message": "Lead converted successfully",
+
+#         "customer_id": customer.id if customer else None,
+
+#         "account_id": account.id if account else None,
+
+#         "deal_id": deal.id if deal else None,
+#     })
 @api_view(["POST"])
 def convert_lead(request, lead_id):
     try:
@@ -1664,6 +1837,55 @@ def convert_lead(request, lead_id):
     customer = None
     account = None
     deal = None
+
+    # ----------------------------
+    # ACCOUNT FIELD BUILDER
+    # ----------------------------
+    # Mirrors add_account's field mapping so the convert-lead form
+    # (AccountFormModal in convertMode) doesn't silently lose data —
+    # the frontend sends acc_name/phone/acc_site/etc, not
+    # company_name/phone_number, and previously only website+industry
+    # were being read here.
+
+    def build_account_fields():
+        billing_data = request.data.get("billing_add")
+        shipping_data = request.data.get("shipping_add")
+
+        billing_address = None
+        if billing_data:
+            billing_address = Address.objects.create(
+                country=billing_data.get("country", ""),
+                address=billing_data.get("address", ""),
+                street_address=billing_data.get("street_add", ""),
+                city=billing_data.get("city", ""),
+                state=billing_data.get("state", ""),
+                zip_code=billing_data.get("zip_code", ""),
+            )
+
+        shipping_address = None
+        if shipping_data:
+            shipping_address = Address.objects.create(
+                country=shipping_data.get("country", ""),
+                address=shipping_data.get("address", ""),
+                street_address=shipping_data.get("street_add", ""),
+                city=shipping_data.get("city", ""),
+                state=shipping_data.get("state", ""),
+                zip_code=shipping_data.get("zip_code", ""),
+            )
+
+        return {
+            "account_name": request.data.get("acc_name", lead.company_name),
+            "assigned_to_id": request.data.get("assigned_to") or (lead.assigned_to_id if lead.assigned_to else None),
+            "phone_number": request.data.get("phone", lead.phone_number),
+            "account_site": request.data.get("acc_site", ""),
+            "website": request.data.get("website", ""),
+            "account_type": request.data.get("acc_type", ""),
+            "industry": request.data.get("industry", ""),
+            "ownership": request.data.get("ownership", ""),
+            "employees": request.data.get("employees", ""),
+            "billing_address": billing_address,
+            "shipping_address": shipping_address,
+        }
 
     # ----------------------------
     # CUSTOMER
@@ -1718,28 +1940,7 @@ def convert_lead(request, lead_id):
         if account is None:
             account = Accounts.objects.create(
                 company=request.company,
-
-                account_name=request.data.get(
-                    "company_name",
-                    lead.company_name,
-                ),
-
-                assigned_to=lead.assigned_to,
-
-                phone_number=request.data.get(
-                    "phone_number",
-                    lead.phone_number,
-                ),
-
-                website=request.data.get(
-                    "website",
-                    "",
-                ),
-
-                industry=request.data.get(
-                    "industry",
-                    "",
-                ),
+                **build_account_fields(),
             )
 
     # ----------------------------
@@ -1787,11 +1988,7 @@ def convert_lead(request, lead_id):
             if account is None:
                 account = Accounts.objects.create(
                     company=request.company,
-                    account_name=lead.company_name,
-                    assigned_to=lead.assigned_to,
-                    phone_number=lead.phone_number,
-                    website="",
-                    industry="",
+                    **build_account_fields(),
                 )
 
             deal = Deal.objects.create(
