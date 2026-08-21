@@ -1834,6 +1834,9 @@ def convert_lead(request, lead_id):
     create_account = request.data.get("create_account", False)
     create_deal = request.data.get("create_deal", False)
 
+    customer_data = request.data.get("customer_data") or {}
+    account_data = request.data.get("account_data") or {}
+
     customer = None
     account = None
     deal = None
@@ -1841,15 +1844,14 @@ def convert_lead(request, lead_id):
     # ----------------------------
     # ACCOUNT FIELD BUILDER
     # ----------------------------
-    # Mirrors add_account's field mapping so the convert-lead form
-    # (AccountFormModal in convertMode) doesn't silently lose data —
-    # the frontend sends acc_name/phone/acc_site/etc, not
-    # company_name/phone_number, and previously only website+industry
-    # were being read here.
+    # AccountFormModal (convertMode) builds its payload and hands it to
+    # LeadsManagement.jsx's submitConversion, which nests it under
+    # "account_data" in the request body (not top-level) — so every
+    # field here must be read from account_data, not request.data.
 
     def build_account_fields():
-        billing_data = request.data.get("billing_add")
-        shipping_data = request.data.get("shipping_add")
+        billing_data = account_data.get("billing_add")
+        shipping_data = account_data.get("shipping_add")
 
         billing_address = None
         if billing_data:
@@ -1874,15 +1876,15 @@ def convert_lead(request, lead_id):
             )
 
         return {
-            "account_name": request.data.get("acc_name", lead.company_name),
-            "assigned_to_id": request.data.get("assigned_to") or (lead.assigned_to_id if lead.assigned_to else None),
-            "phone_number": request.data.get("phone", lead.phone_number),
-            "account_site": request.data.get("acc_site", ""),
-            "website": request.data.get("website", ""),
-            "account_type": request.data.get("acc_type", ""),
-            "industry": request.data.get("industry", ""),
-            "ownership": request.data.get("ownership", ""),
-            "employees": request.data.get("employees", ""),
+            "account_name": account_data.get("acc_name", lead.company_name),
+            "assigned_to_id": account_data.get("assigned_to") or (lead.assigned_to_id if lead.assigned_to else None),
+            "phone_number": account_data.get("phone", lead.phone_number),
+            "account_site": account_data.get("acc_site", ""),
+            "website": account_data.get("website", ""),
+            "account_type": account_data.get("acc_type", ""),
+            "industry": account_data.get("industry", ""),
+            "ownership": account_data.get("ownership", ""),
+            "employees": account_data.get("employees", ""),
             "billing_address": billing_address,
             "shipping_address": shipping_address,
         }
@@ -1890,6 +1892,9 @@ def convert_lead(request, lead_id):
     # ----------------------------
     # CUSTOMER
     # ----------------------------
+    # CustomerFormModal (convertMode) likely nests its payload under
+    # "customer_data" the same way — reading from customer_data here
+    # to match, instead of the old flat request.data.get() lookups.
 
     if create_customer:
 
@@ -1903,27 +1908,27 @@ def convert_lead(request, lead_id):
                 company=request.company,
                 lead=lead,
 
-                company_name=request.data.get(
-                    "company_name",
+                company_name=customer_data.get(
+                    "companyName",
                     lead.company_name,
                 ),
 
-                contact_name=request.data.get(
-                    "contact_name",
+                contact_name=customer_data.get(
+                    "contactName",
                     lead.full_name,
                 ),
 
-                phone_number=request.data.get(
-                    "phone_number",
+                phone_number=customer_data.get(
+                    "phoneNumber",
                     lead.phone_number,
                 ),
 
-                email=request.data.get(
+                email=customer_data.get(
                     "email",
                     lead.email,
                 ),
 
-                industry=request.data.get("industry", ""),
+                industry=customer_data.get("industry", ""),
             )
 
     # ----------------------------
@@ -2014,7 +2019,6 @@ def convert_lead(request, lead_id):
 
         "deal_id": deal.id if deal else None,
     })
-
     
 # ............ unconverted lead show in dropdown ........
 @api_view(['GET'])
