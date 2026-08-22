@@ -5273,7 +5273,7 @@ def add_service(request):
             category=request.data.get("category", ""),
             description=request.data.get("description", ""),
             unit_price=unit_price,
-            tax_percentage=request.data.get("tax_percentage", 0),
+            tax_percentage=request.data.get("tax_percentage") or 0,
             billing_type=request.data.get("billing_type", "fixed"),
             duration=request.data.get("duration", ""),
             status=request.data.get("status", "active"),
@@ -5343,7 +5343,7 @@ def update_service(request, id):
         service.category = request.data.get("category", service.category)
         service.description = request.data.get("description", service.description)
         service.unit_price = request.data.get("unit_price") or service.unit_price
-        service.tax_percentage = request.data.get("tax_percentage", service.tax_percentage)
+        service.tax_percentage = request.data.get("tax_percentage") or service.tax_percentage
         service.billing_type = request.data.get("billing_type", service.billing_type)
         service.duration = request.data.get("duration", service.duration)
         service.status = request.data.get("status", service.status)
