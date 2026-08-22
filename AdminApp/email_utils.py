@@ -1,19 +1,16 @@
-import os
-import resend
-
-resend.api_key = os.getenv("RESEND_API_KEY")
+from django.core.mail import send_mail
 
 
 def send_invite_email(to_email, subject, html_content, from_email=None):
     """
-    Sends an email via Resend's HTTP API instead of SMTP.
-    Works on Render because it uses HTTPS (443), not SMTP ports
-    (587/465/25) that Render blocks outbound.
+    Sends an email via SMTP, through the IPv4-forcing custom backend
+    configured in settings.EMAIL_BACKEND.
     """
-    params = {
-        "from": from_email or "onboarding@resend.dev",  # swap once you verify your own domain in Resend
-        "to": [to_email],
-        "subject": subject,
-        "html": html_content,
-    }
-    return resend.Emails.send(params)
+    send_mail(
+        subject=subject,
+        message="",              # plain-text fallback (optional)
+        from_email=from_email,   # None falls back to settings.DEFAULT_FROM_EMAIL
+        recipient_list=[to_email],
+        html_message=html_content,
+        fail_silently=False,
+    )
