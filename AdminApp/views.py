@@ -331,7 +331,7 @@ def meta_connect(request):
     params = {
         "client_id": settings.META_APP_ID,
         "redirect_uri": settings.META_REDIRECT_URI,
-        "config_id": settings.META_CONFIG_ID,
+        "scope": "public_profile,email,ads_management,ads_read",
         "state": state,
         "response_type": "code",
     }
