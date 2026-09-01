@@ -4,7 +4,7 @@ import uuid
 from django.db import models
 from django.contrib.auth.models import User
 from django.conf import settings as django_settings
-
+from cloudinary.models import CloudinaryField
 
 
 class Company(models.Model):
@@ -36,13 +36,14 @@ class Staff(models.Model):
     email = models.EmailField(unique=True)
     role = models.CharField(max_length=50, choices=ROLE_CHOICES, blank=True, default="")
     department = models.CharField(max_length=100, blank=True, default="")
-    profile_type = models.CharField(max_length=100, blank=True, default="")
 
     mobile = models.CharField(max_length=20, blank=True, default="")
     website = models.CharField(max_length=255, blank=True, default="")
     fax = models.CharField(max_length=50, blank=True, default="")
     alias = models.CharField(max_length=100, blank=True, default="")
     date_of_birth = models.DateField(null=True, blank=True)
+
+    profile_picture = CloudinaryField('image', blank=True, null=True)
 
     address = models.OneToOneField("Address", on_delete=models.SET_NULL, null=True, blank=True, related_name="staff")
 

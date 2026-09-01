@@ -5382,12 +5382,12 @@ def _serialize_profile(staff):
         "role": staff.get_role_display() if staff.role else "",
         "roleValue": staff.role,
         "department": staff.department,
-        "profileType": staff.profile_type,
         "mobile": staff.mobile,
         "website": staff.website,
         "fax": staff.fax,
         "alias": staff.alias,
         "dateOfBirth": staff.date_of_birth.isoformat() if staff.date_of_birth else "",
+        "profilePicture": staff.profile_picture.url if staff.profile_picture else "",
         "street": addr.street_address if addr else "",
         "city": addr.city if addr else "",
         "state": addr.state if addr else "",
@@ -5414,7 +5414,6 @@ def update_profile(request):
         ("website", "website"),
         ("fax", "fax"),
         ("alias", "alias"),
-        ("profile_type", "profileType"),
     ]
 
     for model_field, payload_key in editable_fields:
@@ -5424,6 +5423,9 @@ def update_profile(request):
     if "dateOfBirth" in data:
         raw_dob = data.get("dateOfBirth")
         staff.date_of_birth = parse_date(raw_dob) if raw_dob else None
+
+    if "profilePicture" in request.FILES:
+        staff.profile_picture = request.FILES["profilePicture"]
 
     address_fields = {
         "street_address": data.get("street"),
