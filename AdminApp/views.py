@@ -14,7 +14,8 @@ from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, render
 import requests
 from rest_framework.permissions import AllowAny
-from rest_framework.decorators import api_view, authentication_classes, permission_classes
+from rest_framework.decorators import api_view, authentication_classes, permission_classes, parser_classes
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db.models import Sum
 from django.db.models.functions import TruncWeek
 from django.db.models import Count
@@ -852,6 +853,14 @@ def add_deal(request):
 
     related_type = request.data.get("related_type")
     related_id = request.data.get("related_id")
+
+    if not related_type or not related_id:
+        if request.data.get("customer_id"):
+            related_type = "customer"
+            related_id = request.data.get("customer_id")
+        elif request.data.get("account_id"):
+            related_type = "account"
+            related_id = request.data.get("account_id")
 
     if not deal_name or not company_name:
         return HttpResponse(
@@ -1722,6 +1731,63 @@ def report_view(request):
     return JsonResponse(report)
 
 
+@api_view(["GET"])
+def report_pdf(request):
+    """Generate and return a PDF version of the CRM summary report."""
+    from io import BytesIO
+    from xhtml2pdf import pisa
+    from django.template.loader import render_to_string
+    from django.db.models import Sum, Count
+    from datetime import date as date_cls
+
+    start_date = request.GET.get("start_date")
+    end_date = request.GET.get("end_date")
+
+    leads_qs = Lead.objects.filter(company=request.company)
+    deals_qs = Deal.objects.filter(company=request.company)
+    customers_qs = Customer.objects.filter(company=request.company)
+    tasks_qs = Task.objects.filter(company=request.company)
+
+    if start_date and end_date:
+        leads_qs = leads_qs.filter(created_at__date__range=[start_date, end_date])
+        deals_qs = deals_qs.filter(created_at__date__range=[start_date, end_date])
+        customers_qs = customers_qs.filter(created_at__date__range=[start_date, end_date])
+        tasks_qs = tasks_qs.filter(created_at__date__range=[start_date, end_date])
+
+    total_revenue = customers_qs.aggregate(total=Sum("lifetime_value"))["total"] or 0
+    deals_by_stage = list(deals_qs.values("stage").annotate(count=Count("id")))
+    leads_by_source = list(leads_qs.values("lead_source").annotate(count=Count("id")))
+
+    ctx = {
+        "date": date_cls.today().strftime("%d %b %Y"),
+        "start_date": start_date or "All time",
+        "end_date": end_date or "All time",
+        "total_revenue": f"{float(total_revenue):,.2f}",
+        "total_leads": leads_qs.count(),
+        "total_deals": deals_qs.count(),
+        "total_customers": customers_qs.count(),
+        "total_tasks": tasks_qs.count(),
+        "active_customers": customers_qs.filter(status="active").count(),
+        "pending_tasks": tasks_qs.filter(status="pending").count(),
+        "completed_tasks": tasks_qs.filter(status="completed").count(),
+        "high_priority_tasks": tasks_qs.filter(priority="high").count(),
+        "deals_by_stage": deals_by_stage,
+        "leads_by_source": leads_by_source,
+    }
+
+    html_string = render_to_string("report_pdf.html", ctx)
+    buffer = BytesIO()
+    pisa_status = pisa.CreatePDF(html_string, dest=buffer)
+
+    if pisa_status.err:
+        return HttpResponse("Error generating PDF", status=500)
+
+    buffer.seek(0)
+    filename = f"CRM_Report_{date_cls.today().isoformat()}.pdf"
+    response = HttpResponse(buffer, content_type="application/pdf")
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
+
 
 # ......... convert lead to customer through button ...........
 @api_view(['GET'])
@@ -2059,12 +2125,13 @@ def convert_lead(request, lead_id):
 
     if create_deal:
 
-        related_type = request.data.get("related_type")
+        related_type = request.data.get("related_type") or ("customer" if create_customer or customer else "account" if create_account or account else "customer")
 
         deal_kwargs = {
             "company": request.company,
             "lead": lead,
             "deal_name": request.data.get("deal_name", f"{lead.company_name} Deal"),
+            "company_name": lead.company_name or (account_data.get("acc_name") if account_data else "") or (customer_data.get("companyName") if customer_data else "") or "Deal",
             "deal_amount": request.data.get("deal_amount") or 0,
             "stage": request.data.get("stage") or "Proposal",
             "assigned_to_id": request.data.get("assigned_to") or None,
@@ -2222,7 +2289,7 @@ def add_picklist_option(request):
         return HttpResponse("field, value and label are required", status=400)
  
     exists = PicklistOption.objects.filter(
-        Q(company=request.company) | Q(company__isnull=True),
+        company=request.company,
         field=field,
         value=value,
     ).exists()
@@ -2230,15 +2297,28 @@ def add_picklist_option(request):
     if exists:
         return HttpResponse("This option already exists", status=400)
  
-    max_order = PicklistOption.objects.filter(company=request.company, field=field).count()
-    PicklistOption.objects.create(company=request.company, field=field, value=value, label=label, order=max_order)
+    max_order = PicklistOption.objects.filter(
+        Q(company=request.company) | Q(company__isnull=True),
+        field=field
+    ).count()
+
+    PicklistOption.objects.create(
+        company=request.company,
+        field=field,
+        value=value,
+        label=label,
+        order=max_order
+    )
     return HttpResponse("Option added successfully", status=201)
  
  
 @api_view(['PUT'])
 def update_picklist_option(request, id):
     try:
-        option = PicklistOption.objects.get(id=id, company=request.company)
+        option = PicklistOption.objects.get(
+            Q(company=request.company) | Q(company__isnull=True),
+            id=id
+        )
     except PicklistOption.DoesNotExist:
         return HttpResponse("Option not found", status=404)
  
@@ -2251,7 +2331,10 @@ def update_picklist_option(request, id):
 @api_view(['DELETE'])
 def delete_picklist_option(request, id):
     try:
-        option = PicklistOption.objects.get(id=id, company=request.company)
+        option = PicklistOption.objects.get(
+            Q(company=request.company) | Q(company__isnull=True),
+            id=id
+        )
         option.delete()
         return JsonResponse({"message": "Option deleted successfully"})
     except PicklistOption.DoesNotExist:
@@ -5508,6 +5591,7 @@ def get_profile(request):
 
 
 @api_view(["PATCH"])
+@parser_classes([MultiPartParser, FormParser, JSONParser])
 def update_profile(request):
     staff = request.staff
     data = request.data

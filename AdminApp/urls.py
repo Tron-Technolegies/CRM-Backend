@@ -38,6 +38,7 @@ urlpatterns= [
     path('staff/delete/<int:id>/', views.delete_staff, name='staff-delete'),
 
     path('report/dashboard/', views.report_view, name='report-dashboard'),
+    path('report/pdf/', views.report_pdf, name='report-pdf'),
 
     path('lead/customer/prefill/<int:lead_id>/', views.get_lead_to_customer_prefill, name='lead-to-customer'),
     path('lead/convert/<int:lead_id>/', views.convert_lead, name='lead-convert'),

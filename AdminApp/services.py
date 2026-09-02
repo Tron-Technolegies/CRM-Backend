@@ -24,6 +24,20 @@ def get_related_label(related_type, lead=None, contact=None, deal=None, account=
     return None
 
 
+import threading
+
+def _send_email_async(subject, message, from_email, recipient_list):
+    try:
+        send_mail(
+            subject=subject,
+            message=message,
+            from_email=from_email,
+            recipient_list=recipient_list,
+            fail_silently=True,
+        )
+    except Exception as e:
+        logger.warning(f"Async email sending failed: {e}")
+
 def notify_user(
     *,
     company,
@@ -84,14 +98,13 @@ def notify_user(
     else:
         send_email = True
 
-    if send_email:
-        send_mail(
-            subject=title,
-            message=message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[user.email],
-            fail_silently=False,
+    if send_email and user.email:
+        thread = threading.Thread(
+            target=_send_email_async,
+            args=(title, message, settings.DEFAULT_FROM_EMAIL, [user.email]),
+            daemon=True,
         )
+        thread.start()
 
     return notification
 
