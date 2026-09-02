@@ -772,12 +772,12 @@ def delete_lead(request, id):
 
 # ...............deal....................
 # ............ add lead id in add deal ..............
-from .models import Deal, Lead, Customer, Notification, NotificationPreference, Staff
-from .models import Accounts  # adjust import path/name to match your app
+from .models import (Deal, Customer, Staff, Accounts,)
 
 
 def serialize_deal(deal):
     related = None
+
     if deal.customer_id:
         related = {
             "type": "customer",
@@ -797,7 +797,11 @@ def serialize_deal(deal):
         "company_name": deal.company_name,
         "stage": deal.stage,
         "value": float(deal.deal_amount) if deal.deal_amount else 0,
-        "expectedCloseDate": str(deal.expected_close_date) if deal.expected_close_date else "—",
+        "expectedCloseDate": (
+            str(deal.expected_close_date)
+            if deal.expected_close_date
+            else "—"
+        ),
         "assignedTo": deal.assigned_to.full_name if deal.assigned_to else "—",
         "assignedToId": deal.assigned_to.id if deal.assigned_to else None,
         "source": deal.deal_source,
@@ -809,30 +813,38 @@ def serialize_deal(deal):
 
 
 def _resolve_related(request, related_type, related_id):
-    """Returns (customer, account, error_message)."""
-    if related_type == "customer" and related_id:
-        customer = Customer.objects.filter(id=related_id, company=request.company).first()
+    if related_type == "customer":
+        customer = Customer.objects.filter(
+            id=related_id,
+            company=request.company
+        ).first()
+
         if not customer:
             return None, None, "Customer not found"
+
         return customer, None, None
 
-    if related_type == "account" and related_id:
-        account = Accounts.objects.filter(id=related_id, company=request.company).first()
+    if related_type == "account":
+        account = Accounts.objects.filter(
+            id=related_id,
+            company=request.company
+        ).first()
+
         if not account:
             return None, None, "Account not found"
+
         return None, account, None
 
-    # empty/"none"/None → clear both
-    return None, None, None
+    return None, None, "A deal must be linked to a Customer or an Account"
 
 
-@api_view(['POST'])
+@api_view(["POST"])
 def add_deal(request):
     deal_name = request.data.get("deal_name")
     company_name = request.data.get("company_name")
     deal_amount = request.data.get("deal_amount")
     stage = request.data.get("stage")
-    assigned_to = request.data.get("assigned_to")
+    assigned_to_id = request.data.get("assigned_to")
     expected_close_date = request.data.get("expected_close_date")
     deal_source = request.data.get("deal_source")
     priority = request.data.get("priority")
@@ -853,9 +865,31 @@ def add_deal(request):
             status=400
         )
 
-    customer, account, err = _resolve_related(request, related_type, related_id)
-    if err:
-        return HttpResponse(err, status=404)
+    customer, account, error = _resolve_related(
+        request,
+        related_type,
+        related_id
+    )
+
+    if error:
+        return HttpResponse(
+            error,
+            status=404
+        )
+
+    assigned_to = None
+
+    if assigned_to_id:
+        assigned_to = Staff.objects.filter(
+            id=assigned_to_id,
+            company=request.company
+        ).first()
+
+        if not assigned_to:
+            return HttpResponse(
+                "Assigned staff member not found",
+                status=404
+            )
 
     try:
         deal = Deal.objects.create(
@@ -864,7 +898,7 @@ def add_deal(request):
             company_name=company_name,
             deal_amount=deal_amount,
             stage=stage,
-            assigned_to_id=assigned_to,
+            assigned_to=assigned_to,
             expected_close_date=expected_close_date,
             deal_source=deal_source,
             priority=priority,
@@ -891,38 +925,61 @@ def add_deal(request):
                     ),
                 )
             except Exception:
-                logger.exception("Failed to notify staff for deal %s", deal.id)
+                logger.exception(
+                    "Failed to notify staff for deal %s",
+                    deal.id
+                )
 
-        return HttpResponse("Deal created successfully", status=201)
+        return HttpResponse(
+            "Deal created successfully",
+            status=201
+        )
 
     except Exception as e:
+        logger.exception("Failed to create deal")
         return HttpResponse(str(e), status=500)
 
 
-@api_view(['GET'])
+@api_view(["GET"])
 def view_deals(request):
     deals = (
         Deal.objects
         .filter(company=request.company)
-        .select_related('assigned_to', 'customer', 'account')
-        .order_by('-updated_at')
+        .select_related("assigned_to", "customer", "account")
+        .order_by("-updated_at")
     )
-    return JsonResponse([serialize_deal(d) for d in deals], safe=False)
+
+    return JsonResponse(
+        [serialize_deal(deal) for deal in deals],
+        safe=False
+    )
 
 
-@api_view(['GET'])
+@api_view(["GET"])
 def view_single_deals(request, id):
     deal = get_object_or_404(
-        Deal.objects.select_related('assigned_to', 'customer', 'account'),
-        id=id, company=request.company
+        Deal.objects.select_related(
+            "assigned_to",
+            "customer",
+            "account"
+        ),
+        id=id,
+        company=request.company
     )
-    return JsonResponse(serialize_deal(deal), safe=False)
+
+    return JsonResponse(
+        serialize_deal(deal),
+        safe=False
+    )
 
 
-@api_view(['PUT'])
+@api_view(["PUT"])
 def update_deal(request, id):
     try:
-        deal = Deal.objects.get(id=id, company=request.company)
+        deal = Deal.objects.get(
+            id=id,
+            company=request.company
+        )
     except Deal.DoesNotExist:
         return HttpResponse("Deal not found", status=404)
 
@@ -930,18 +987,42 @@ def update_deal(request, id):
 
     deal.deal_name = request.data.get("deal_name") or deal.deal_name
     deal.company_name = request.data.get("company_name") or deal.company_name
-    deal.deal_amount = request.data.get("deal_amount") or deal.deal_amount
+    deal.deal_amount = (
+        request.data.get("deal_amount")
+        if request.data.get("deal_amount") is not None
+        else deal.deal_amount
+    )
     deal.stage = request.data.get("stage") or deal.stage
-    deal.expected_close_date = request.data.get("expected_close_date") or deal.expected_close_date
+    deal.expected_close_date = (
+        request.data.get("expected_close_date")
+        or deal.expected_close_date
+    )
     deal.deal_source = request.data.get("deal_source") or deal.deal_source
     deal.priority = request.data.get("priority") or deal.priority
-    deal.deal_description = request.data.get("deal_description") or deal.deal_description
+    deal.deal_description = (
+        request.data.get("deal_description")
+        if request.data.get("deal_description") is not None
+        else deal.deal_description
+    )
 
-    assigned_to_id = request.data.get("assigned_to")
-    if assigned_to_id:
-        deal.assigned_to = get_object_or_404(Staff, id=assigned_to_id)
-    else:
-        deal.assigned_to = None
+    if "assigned_to" in request.data:
+        assigned_to_id = request.data.get("assigned_to")
+
+        if assigned_to_id:
+            assigned_to = Staff.objects.filter(
+                id=assigned_to_id,
+                company=request.company
+            ).first()
+
+            if not assigned_to:
+                return HttpResponse(
+                    "Assigned staff member not found",
+                    status=404
+                )
+
+            deal.assigned_to = assigned_to
+        else:
+            deal.assigned_to = None
 
     if "related_type" in request.data:
         related_type = request.data.get("related_type")
@@ -953,9 +1034,14 @@ def update_deal(request, id):
                 status=400
             )
 
-        customer, account, err = _resolve_related(request, related_type, related_id)
-        if err:
-            return HttpResponse(err, status=404)
+        customer, account, error = _resolve_related(
+            request,
+            related_type,
+            related_id
+        )
+
+        if error:
+            return HttpResponse(error, status=404)
 
         deal.customer = customer
         deal.account = account
@@ -963,7 +1049,11 @@ def update_deal(request, id):
     try:
         deal.save()
 
-        if deal.assigned_to and deal.assigned_to_id != previous_staff_id and deal.assigned_to.user:
+        if (
+            deal.assigned_to
+            and deal.assigned_to_id != previous_staff_id
+            and deal.assigned_to.user
+        ):
             try:
                 notify_user(
                     company=request.company,
@@ -981,19 +1071,34 @@ def update_deal(request, id):
                     ),
                 )
             except Exception:
-                logger.exception("Failed to notify staff for reassigned deal %s", deal.id)
+                logger.exception(
+                    "Failed to notify staff for reassigned deal %s",
+                    deal.id
+                )
 
-        return HttpResponse("Deal updated successfully", status=200)
+        return HttpResponse(
+            "Deal updated successfully",
+            status=200
+        )
+
     except Exception as e:
+        logger.exception("Failed to update deal %s", id)
         return HttpResponse(str(e), status=500)
 
 
-@api_view(['DELETE'])
+@api_view(["DELETE"])
 def delete_deal(request, id):
-    deal = get_object_or_404(Deal, id=id, company=request.company)
-    deal.delete()
-    return JsonResponse({"message": "successfully deleted"})
+    deal = get_object_or_404(
+        Deal,
+        id=id,
+        company=request.company
+    )
 
+    deal.delete()
+
+    return JsonResponse({
+        "message": "Successfully deleted"
+    })
 
 
 # ...................customer...................
