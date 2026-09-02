@@ -738,11 +738,11 @@ def update_lead(request, id):
     try:
         lead.save()
 
-        if lead.assigned_to and lead.assigned_to_id != previous_staff_id and lead.assigned_to.user:
+        if lead.assigned_to and lead.assigned_to_id != previous_staff_id:
             try:
                 notify_user(
                     company=request.company,
-                    user=lead.assigned_to.user,
+                    user=lead.assigned_to,
                     notification_type="lead_assigned",
                     title="Lead Assigned to You",
                     message=(
@@ -846,7 +846,11 @@ def add_deal(request):
     deal_amount = request.data.get("deal_amount")
     stage = request.data.get("stage")
     assigned_to_id = request.data.get("assigned_to")
-    expected_close_date = request.data.get("expected_close_date")
+    expected_close_date = (
+        request.data.get("expected_close_date")
+        or request.data.get("expected_closing_date")
+        or request.data.get("expectedCloseDate")
+    )
     deal_source = request.data.get("deal_source")
     priority = request.data.get("priority")
     deal_description = request.data.get("deal_description")
@@ -916,11 +920,11 @@ def add_deal(request):
             account=account,
         )
 
-        if deal.assigned_to and deal.assigned_to.user:
+        if deal.assigned_to:
             try:
                 notify_user(
                     company=request.company,
-                    user=deal.assigned_to.user,
+                    user=deal.assigned_to,
                     notification_type="deal_assigned",
                     title="New Deal Assigned",
                     message=(
@@ -1061,12 +1065,11 @@ def update_deal(request, id):
         if (
             deal.assigned_to
             and deal.assigned_to_id != previous_staff_id
-            and deal.assigned_to.user
         ):
             try:
                 notify_user(
                     company=request.company,
-                    user=deal.assigned_to.user,
+                    user=deal.assigned_to,
                     notification_type="deal_assigned",
                     title="Deal Assigned to You",
                     message=(
@@ -1343,12 +1346,12 @@ def add_task(request):
         return JsonResponse({"error": str(e)}, status=500)
 
     # Notification failure shouldn't undo a successful task creation
-    if staff and staff.user:
+    if staff:
         related_label = get_related_label(related_type, lead, contact, deal, account)
         try:
             notify_user(
                 company=request.company,
-                user=staff.user,
+                user=staff,
                 notification_type="task_assigned",
                 title="New Task Assigned",
                 message=(
@@ -1504,8 +1507,30 @@ def update_task(request, id):
         except (Lead.DoesNotExist, Customer.DoesNotExist, Deal.DoesNotExist, Accounts.DoesNotExist):
             return HttpResponse("Invalid related record", status=400)
 
+    previous_staff_id = task.assigned_to_id
+
     try:
         task.save()
+
+        if task.assigned_to and task.assigned_to_id != previous_staff_id:
+            try:
+                notify_user(
+                    company=request.company,
+                    user=task.assigned_to,
+                    notification_type="task_assigned",
+                    title="Task Assigned to You",
+                    message=(
+                        f"Hello {task.assigned_to.full_name},\n\n"
+                        f"A task has been assigned to you.\n\n"
+                        f"Task: {task.title}\n"
+                        f"Priority: {task.priority}\n"
+                        f"Due Date: {task.due_date}\n\n"
+                        f"Please log in to the CRM to view the task details."
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify staff for reassigned task %s", task.id)
+
         return HttpResponse("Task updated successfully", status=200)
     except Exception as e:
         return HttpResponse(str(e), status=500)
@@ -3262,12 +3287,12 @@ def add_call(request):
             account_id=related_account_id if related_type == "account" else None,
         )
 
-        if call.assigned_to and call.assigned_to.user:
+        if call.assigned_to:
             related_label = get_related_label(related_type, call.lead, call.contact, call.deal, call.account)
             try:
                 notify_user(
                     company=request.company,
-                    user=call.assigned_to.user,
+                    user=call.assigned_to,
                     notification_type="call_assigned",
                     title="New Call Assigned",
                     message=(
@@ -3395,13 +3420,13 @@ def update_call(request, id):
 
         call.save()
 
-        if call.assigned_to and call.assigned_to_id != previous_staff_id and call.assigned_to.user:
+        if call.assigned_to and call.assigned_to_id != previous_staff_id:
             related_type_resolved = "lead" if call.lead else "contact" if call.contact else "deal" if call.deal else "account" if call.account else "none"
             related_label = get_related_label(related_type_resolved, call.lead, call.contact, call.deal, call.account)
             try:
                 notify_user(
                     company=request.company,
-                    user=call.assigned_to.user,
+                    user=call.assigned_to,
                     notification_type="call_assigned",
                     title="Call Assigned to You",
                     message=(
@@ -5691,10 +5716,19 @@ def notification_preferences(request):
 
 @api_view(["GET"])
 def get_notifications(request):
+    user = getattr(request, "user", None)
+    if not user or not user.is_authenticated:
+        user = getattr(request, "staff", None) and getattr(request.staff, "user", None)
+    
+    company = getattr(request, "company", None) or (user and hasattr(user, "staff") and user.staff.company)
+
+    if not user or not company:
+        return Response([])
+
     notifications = Notification.objects.filter(
-        company=request.company,
-        user=request.user
-    )
+        company=company,
+        user=user,
+    ).order_by("-created_at")
 
     data = [
         {
@@ -5712,21 +5746,36 @@ def get_notifications(request):
 
 @api_view(["GET"])
 def get_unread_count(request):
+    user = getattr(request, "user", None)
+    if not user or not user.is_authenticated:
+        user = getattr(request, "staff", None) and getattr(request.staff, "user", None)
+
+    company = getattr(request, "company", None) or (user and hasattr(user, "staff") and user.staff.company)
+
+    if not user or not company:
+        return Response({"count": 0})
+
     count = Notification.objects.filter(
-        company=request.company,
-        user=request.user,
-        is_read=False
+        company=company,
+        user=user,
+        is_read=False,
     ).count()
 
     return Response({"count": count})
 
 @api_view(["PUT"])
 def mark_notification_read(request, id):
+    user = getattr(request, "user", None)
+    if not user or not user.is_authenticated:
+        user = getattr(request, "staff", None) and getattr(request.staff, "user", None)
+
+    company = getattr(request, "company", None) or (user and hasattr(user, "staff") and user.staff.company)
+
     notification = get_object_or_404(
         Notification,
         id=id,
-        company=request.company,
-        user=request.user,
+        company=company,
+        user=user,
     )
 
     notification.is_read = True
@@ -5736,11 +5785,18 @@ def mark_notification_read(request, id):
 
 @api_view(["PUT"])
 def mark_all_notifications_read(request):
-    Notification.objects.filter(
-        company=request.company,
-        user=request.user,
-        is_read=False,
-    ).update(is_read=True)
+    user = getattr(request, "user", None)
+    if not user or not user.is_authenticated:
+        user = getattr(request, "staff", None) and getattr(request.staff, "user", None)
+
+    company = getattr(request, "company", None) or (user and hasattr(user, "staff") and user.staff.company)
+
+    if user and company:
+        Notification.objects.filter(
+            company=company,
+            user=user,
+            is_read=False,
+        ).update(is_read=True)
 
     return Response({"message": "Success"})
 
