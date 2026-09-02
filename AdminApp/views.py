@@ -43,7 +43,7 @@ from django.utils.dateparse import parse_date
 
 from AdminApp.services import create_lead_for_company, get_related_label, notify_user
 
-from .models import MetaIntegration
+from .models import MetaIntegration, Notification, NotificationPreference
 
 logger = logging.getLogger(__name__)
 
@@ -5689,24 +5689,26 @@ def to_camel(pref):
     return {camel: getattr(pref, field) for camel, field in FIELD_MAP.items()}
 
 
-@api_view(['GET', 'PUT'])
+@api_view(['GET', 'PUT', 'PATCH'])
 def notification_preferences(request):
+    user = getattr(request, "user", None)
+    if not user or not user.is_authenticated:
+        user = getattr(request, "staff", None) and getattr(request.staff, "user", None)
+
+    company = getattr(request, "company", None) or (user and hasattr(user, "staff") and user.staff.company)
+
+    if not user or not company:
+        return JsonResponse({"error": "Unauthorized or missing company"}, status=401)
+
     pref, _ = NotificationPreference.objects.get_or_create(
-        company=request.company, user=request.user
+        company=company, user=user
     )
 
     if request.method == 'GET':
         return JsonResponse(to_camel(pref))
 
-    if request.method == 'PUT':
+    if request.method in ['PUT', 'PATCH']:
         data = request.data
-        unknown_keys = [k for k in data.keys() if k not in FIELD_MAP]
-        if unknown_keys:
-            return JsonResponse(
-                {"error": f"Unknown field(s): {', '.join(unknown_keys)}"},
-                status=400
-            )
-
         for camel, field in FIELD_MAP.items():
             if camel in data:
                 setattr(pref, field, bool(data[camel]))
