@@ -31,6 +31,11 @@ META_REDIRECT_URI = os.getenv("META_REDIRECT_URI")
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
 META_WEBHOOK_VERIFY_TOKEN = os.getenv("META_WEBHOOK_VERIFY_TOKEN")
 
+# settings.py
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_CALLER_ID = os.getenv("TWILIO_CALLER_ID")           # your Twilio number
+BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "https://crm-backend-ejfr.onrender.com").rstrip("/")
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/

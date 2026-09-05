@@ -158,4 +158,9 @@ urlpatterns= [
     path('integrations/meta/callback/', views.meta_callback, name='meta-callback'),
     path('webhooks/meta/', views.meta_webhook, name='meta-webhook'),
     path('integrations/meta/status/', views.meta_status, name='meta-status'),
+
+    path('calls/dial-out/', views.dial_out, name='call-dial-out'),
+    path('calls/connect-twiml/', views.connect_twiml, name='call-connect-twiml'),
+    path('calls/status-callback/', views.call_status_callback, name='call-status-callback'),
+    path('calls/history/', views.call_history, name='call-history'),
 ]

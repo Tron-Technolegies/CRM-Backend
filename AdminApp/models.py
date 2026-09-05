@@ -610,11 +610,45 @@ class Call(models.Model):
     deal = models.ForeignKey(Deal, null=True, blank=True, on_delete=models.SET_NULL, related_name="calls")
     account = models.ForeignKey(Accounts, null=True, blank=True, on_delete=models.SET_NULL, related_name="calls")
 
+    # --- Twilio integration fields ---
+    call_sid = models.CharField(max_length=64, blank=True, null=True, unique=True, db_index=True)
+    from_number = models.CharField(max_length=20, blank=True)
+    to_number = models.CharField(max_length=20, blank=True)
+    twilio_status = models.CharField(
+        max_length=20, blank=True,
+        help_text="Raw status from Twilio: queued, ringing, in-progress, completed, busy, failed, no-answer, canceled",
+    )
+    twilio_duration_seconds = models.PositiveIntegerField(
+        null=True, blank=True, help_text="Raw call duration from Twilio, in seconds"
+    )
+    error_message = models.CharField(
+        max_length=255, blank=True,
+        help_text="Populated if Twilio reports a failure (e.g. trial account unverified-number error)",
+    )
+ 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-
+ 
     def __str__(self):
         return self.subject
+ 
+    def sync_status_from_twilio(self):
+        """Maps Twilio's raw call status to this model's business-facing STATUS
+        choices, and converts duration from seconds to minutes. Call this
+        whenever twilio_status or twilio_duration_seconds changes."""
+        status_map = {
+            "completed": "completed",
+            "no-answer": "missed",
+            "busy": "missed",
+            "failed": "cancelled",
+            "canceled": "cancelled",
+        }
+        if self.twilio_status in status_map:
+            self.status = status_map[self.twilio_status]
+ 
+        if self.twilio_duration_seconds:
+            self.duration = max(1, round(self.twilio_duration_seconds / 60))
+ 
     
 
 

@@ -2,18 +2,31 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import traceback
 from urllib.parse import urlencode
-from venv import logger
+
+try:
+    from twilio.rest import Client
+    from twilio.base.exceptions import TwilioRestException
+    from twilio.request_validator import RequestValidator
+    from twilio.twiml.voice_response import VoiceResponse, Dial
+except ImportError:
+    Client = None
+    TwilioRestException = Exception
+    RequestValidator = None
+    VoiceResponse = None
+    Dial = None
+logger = logging.getLogger(__name__)
 from django.core import signing
 from django.shortcuts import redirect
 
 from django.tasks import task
 from django.utils import json, timezone
-from django.http import HttpResponse, JsonResponse
+from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, render
 import requests
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.decorators import api_view, authentication_classes, permission_classes, parser_classes
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db.models import Sum
@@ -5835,3 +5848,220 @@ def change_password(request):
         return Response({"message": "Password updated successfully"}, status=200)
     except Exception as e:
         return Response({"message": str(e)}, status=500)
+
+
+
+
+# .............. call through twilio ................
+TRIAL_ACCOUNT_ERROR_CODES = {
+    21219: "This number isn't verified for your Twilio trial account. "
+           "Verify it under Phone Numbers > Manage > Verified Caller IDs, "
+           "then try again.",
+    21211: "That phone number looks invalid. Double-check the format "
+           "(include country code, e.g. +91XXXXXXXXXX).",
+    21610: "This number has opted out of messages/calls from your Twilio number.",
+}
+ 
+ 
+def get_twilio_client():
+    return Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+ 
+ 
+def validate_twilio_request(request):
+    if getattr(settings, "DEBUG", False):
+        return True
+    try:
+        validator = RequestValidator(settings.TWILIO_AUTH_TOKEN)
+        signature = request.headers.get("X-Twilio-Signature", "")
+        url = request.build_absolute_uri()
+        params = request.POST.dict() if request.method == "POST" else {}
+        return validator.validate(url, params, signature)
+    except Exception as e:
+        logger.warning("Twilio signature validation error: %s", e)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# 1. Agent clicks "Call" -> this fires
+# ---------------------------------------------------------------------------
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def dial_out(request):
+    """
+    Body:
+    {
+      "to_number": "+91XXXXXXXXXX",
+      "subject": "Follow-up on quote",   # optional, defaults to "Call to <number>"
+      "lead_id": null,
+      "contact_id": null,   # Customer
+      "deal_id": null,
+      "account_id": null,
+      "case_id": null
+    }
+    """
+    staff = request.user.staff
+    company = staff.company
+
+    raw_to_number = request.data.get("to_number")
+    if not raw_to_number:
+        return Response({"error": "to_number is required"}, status=400)
+
+    # Sanitize phone numbers: remove spaces, dashes, parentheses but retain '+'
+    to_number = re.sub(r"[^\d+]", "", str(raw_to_number).strip())
+    if not to_number:
+        return Response({"error": "Invalid phone number provided"}, status=400)
+
+    if not staff.phone_number:
+        return Response(
+            {"error": "No phone number on file for your account. Please add your phone number in your profile settings."},
+            status=400,
+        )
+
+    staff_phone = re.sub(r"[^\d+]", "", str(staff.phone_number).strip())
+    client = get_twilio_client()
+
+    backend_base = getattr(settings, "BACKEND_BASE_URL", "https://crm-backend-ejfr.onrender.com").rstrip("/")
+
+    try:
+        call = client.calls.create(
+            to=staff_phone,
+            from_=settings.TWILIO_CALLER_ID,
+            url=(
+                f"{backend_base}/api/admin/calls/connect-twiml/"
+                f"?lead_number={to_number}"
+            ),
+            status_callback=f"{backend_base}/api/admin/calls/status-callback/",
+            status_callback_event=["initiated", "ringing", "answered", "completed"],
+            status_callback_method="POST",
+        )
+    except TwilioRestException as e:
+        friendly = TRIAL_ACCOUNT_ERROR_CODES.get(e.code)
+        if friendly:
+            return Response({"error": friendly, "twilio_code": e.code}, status=400)
+        return Response({"error": f"Twilio error: {e.msg}", "twilio_code": e.code}, status=502)
+    except Exception as e:
+        return Response({"error": f"Failed to place call: {str(e)}"}, status=502)
+
+    call_record = Call.objects.create(
+        company=company,
+        case_id=request.data.get("case_id"),
+        subject=request.data.get("subject") or f"Call to {to_number}",
+        call_type="outbound",
+        status="follow up",  # sensible default until Twilio reports a final status
+        duration=0,
+        start_time=timezone.now(),
+        assigned_to=staff,
+        lead_id=request.data.get("lead_id"),
+        contact_id=request.data.get("contact_id"),
+        deal_id=request.data.get("deal_id"),
+        account_id=request.data.get("account_id"),
+        call_sid=call.sid,
+        from_number=settings.TWILIO_CALLER_ID or "",
+        to_number=to_number,
+        twilio_status="initiated",
+    )
+
+    return Response({"call_sid": call.sid, "call_id": call_record.id, "status": "initiated"})
+ 
+ 
+# ---------------------------------------------------------------------------
+# 2. Twilio calls the agent; once answered, hits this to bridge to the lead
+# ---------------------------------------------------------------------------
+@api_view(["POST", "GET"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def connect_twiml(request):
+    if not validate_twilio_request(request):
+        return HttpResponseForbidden("Invalid Twilio signature")
+ 
+    lead_number = request.GET.get("lead_number") or request.POST.get("lead_number")
+ 
+    response = VoiceResponse()
+    if not lead_number:
+        response.say("No destination number was provided. Goodbye.")
+        return HttpResponse(str(response), content_type="text/xml")
+ 
+    dial = Dial(caller_id=settings.TWILIO_CALLER_ID)
+    dial.number(lead_number)
+    response.append(dial)
+ 
+    return HttpResponse(str(response), content_type="text/xml")
+ 
+ 
+# ---------------------------------------------------------------------------
+# 3. Twilio posts status updates here as the call progresses
+# ---------------------------------------------------------------------------
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def call_status_callback(request):
+    if not validate_twilio_request(request):
+        return HttpResponseForbidden("Invalid Twilio signature")
+ 
+    call_sid = request.data.get("CallSid")
+    twilio_status = request.data.get("CallStatus")
+    duration_seconds = request.data.get("CallDuration")
+    error_code = request.data.get("ErrorCode")
+ 
+    if not call_sid:
+        return Response({"error": "CallSid missing"}, status=400)
+ 
+    try:
+        call_record = Call.objects.get(call_sid=call_sid)
+    except Call.DoesNotExist:
+        return Response({"error": "No matching Call record"}, status=404)
+ 
+    if twilio_status:
+        call_record.twilio_status = twilio_status
+    if duration_seconds:
+        call_record.twilio_duration_seconds = int(duration_seconds)
+    if error_code:
+        call_record.error_message = TRIAL_ACCOUNT_ERROR_CODES.get(
+            int(error_code), f"Twilio error code {error_code}"
+        )
+ 
+    call_record.sync_status_from_twilio()
+    call_record.save()
+ 
+    return Response({"ok": True})
+ 
+ 
+# ---------------------------------------------------------------------------
+# 4. Call history for a lead/contact/deal/account
+# ---------------------------------------------------------------------------
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def call_history(request):
+    """
+    Query params: ?lead_id=  or  ?contact_id=  or  ?deal_id=  or  ?account_id=
+    """
+    company = request.user.staff.company
+    qs = Call.objects.filter(company=company).order_by("-start_time")
+ 
+    for param, field in [
+        ("lead_id", "lead_id"),
+        ("contact_id", "contact_id"),
+        ("deal_id", "deal_id"),
+        ("account_id", "account_id"),
+    ]:
+        value = request.query_params.get(param)
+        if value:
+            qs = qs.filter(**{field: value})
+ 
+    data = [
+        {
+            "id": c.id,
+            "subject": c.subject,
+            "call_sid": c.call_sid,
+            "to_number": c.to_number,
+            "status": c.status,
+            "twilio_status": c.twilio_status,
+            "duration": c.duration,
+            "call_type": c.call_type,
+            "assigned_to": c.assigned_to_id,
+            "start_time": c.start_time.isoformat(),
+        }
+        for c in qs[:100]
+    ]
+    return Response({"results": data})
+ 
