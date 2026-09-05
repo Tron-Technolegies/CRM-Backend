@@ -5917,13 +5917,14 @@ def dial_out(request):
         if not to_number:
             return Response({"error": "Invalid phone number provided"}, status=400)
 
-        if not staff.phone_number:
+        staff_raw_phone = getattr(staff, "mobile", None) or getattr(staff, "phone_number", None) or getattr(staff, "phone", None)
+        if not staff_raw_phone:
             return Response(
-                {"error": "No phone number on file for your staff account. Please add your phone number in your profile settings."},
+                {"error": "No phone number/mobile on file for your staff account. Please add your mobile number in your profile settings."},
                 status=400,
             )
 
-        staff_phone = re.sub(r"[^\d+]", "", str(staff.phone_number).strip())
+        staff_phone = re.sub(r"[^\d+]", "", str(staff_raw_phone).strip())
 
         if Client is None:
             return Response(
