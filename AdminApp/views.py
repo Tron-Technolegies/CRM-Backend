@@ -5881,6 +5881,30 @@ def validate_twilio_request(request):
         return False
 
 
+def normalize_e164_phone(raw_phone, default_country_code="+91"):
+    if not raw_phone:
+        return ""
+    clean = re.sub(r"[^\d+]", "", str(raw_phone).strip())
+    if not clean:
+        return ""
+    if clean.startswith("+"):
+        return clean
+    if clean.startswith("00"):
+        return "+" + clean[2:]
+    # If starts with leading zero and is 11 digits (e.g. 09876543210 -> 9876543210)
+    if clean.startswith("0") and len(clean) == 11:
+        clean = clean[1:]
+    # If standard 10 digit local phone number, prepend default country code (e.g. +91)
+    if len(clean) == 10:
+        cc = default_country_code if default_country_code.startswith("+") else f"+{default_country_code}"
+        return f"{cc}{clean}"
+    # If 12 digits starting with 91, prepend '+'
+    if len(clean) == 12 and clean.startswith("91"):
+        return f"+{clean}"
+    # Fallback: prepend '+'
+    return f"+{clean}"
+
+
 # ---------------------------------------------------------------------------
 # 1. Agent clicks "Call" -> this fires
 # ---------------------------------------------------------------------------
@@ -5912,10 +5936,10 @@ def dial_out(request):
         if not raw_to_number:
             return Response({"error": "to_number is required"}, status=400)
 
-        # Sanitize phone numbers: remove spaces, dashes, parentheses but retain '+'
-        to_number = re.sub(r"[^\d+]", "", str(raw_to_number).strip())
+        # Sanitize and normalize destination phone number to E.164 (e.g. +91XXXXXXXXXX)
+        to_number = normalize_e164_phone(raw_to_number)
         if not to_number:
-            return Response({"error": "Invalid phone number provided"}, status=400)
+            return Response({"error": "Invalid destination phone number provided"}, status=400)
 
         staff_raw_phone = getattr(staff, "mobile", None) or getattr(staff, "phone_number", None) or getattr(staff, "phone", None)
         if not staff_raw_phone:
@@ -5924,7 +5948,13 @@ def dial_out(request):
                 status=400,
             )
 
-        staff_phone = re.sub(r"[^\d+]", "", str(staff_raw_phone).strip())
+        # Sanitize and normalize staff phone number to E.164
+        staff_phone = normalize_e164_phone(staff_raw_phone)
+        if not staff_phone:
+            return Response(
+                {"error": "Invalid staff mobile number format in profile. Please update your profile with a valid number."},
+                status=400,
+            )
 
         if Client is None:
             return Response(
@@ -5998,7 +6028,8 @@ def connect_twiml(request):
     if not validate_twilio_request(request):
         return HttpResponseForbidden("Invalid Twilio signature")
  
-    lead_number = request.GET.get("lead_number") or request.POST.get("lead_number")
+    raw_lead_number = request.GET.get("lead_number") or request.POST.get("lead_number")
+    lead_number = normalize_e164_phone(raw_lead_number)
  
     response = VoiceResponse()
     if not lead_number:
