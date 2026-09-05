@@ -163,4 +163,8 @@ urlpatterns= [
     path('calls/connect-twiml/', views.connect_twiml, name='call-connect-twiml'),
     path('calls/status-callback/', views.call_status_callback, name='call-status-callback'),
     path('calls/history/', views.call_history, name='call-history'),
+
+    path('calls/twilio-settings/', views.get_twilio_settings, name='twilio-settings-get'),
+    path('calls/twilio-settings/save/', views.save_twilio_settings, name='twilio-settings-save'),
+    path('calls/twilio-settings/disconnect/', views.disconnect_twilio, name='twilio-settings-disconnect'),
 ]

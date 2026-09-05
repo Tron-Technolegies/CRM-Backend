@@ -6,6 +6,8 @@ from django.contrib.auth.models import User
 from django.conf import settings as django_settings
 from cloudinary.models import CloudinaryField
 
+from AdminApp.crypto_utils import decrypt_value, encrypt_value
+
 
 class Company(models.Model):
     name = models.CharField(max_length=255)
@@ -1026,3 +1028,26 @@ class MetaIntegration(models.Model):
 
     def __str__(self):
         return f"{self.company.name} - Meta Ads"
+
+
+
+class TwilioSettings(models.Model):
+    company = models.OneToOneField(Company, on_delete=models.CASCADE, related_name="twilio_settings")
+    account_sid = models.CharField(max_length=64)
+    auth_token_encrypted = models.CharField(max_length=512)
+    caller_id = models.CharField(max_length=20)  # E.164 format, e.g. +17372508034
+    is_active = models.BooleanField(default=False)
+    last_verified_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @property
+    def auth_token(self) -> str:
+        return decrypt_value(self.auth_token_encrypted)
+
+    @auth_token.setter
+    def auth_token(self, raw_value: str):
+        self.auth_token_encrypted = encrypt_value(raw_value)
+
+    def __str__(self):
+        return f"Twilio settings for {self.company}"

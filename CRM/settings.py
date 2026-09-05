@@ -36,6 +36,7 @@ TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_CALLER_ID = os.getenv("TWILIO_CALLER_ID")           # your Twilio number
 BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "https://crm-backend-ejfr.onrender.com").rstrip("/")
+FIELD_ENCRYPTION_KEY = os.getenv("FIELD_ENCRYPTION_KEY")
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/

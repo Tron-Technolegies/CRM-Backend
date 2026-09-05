@@ -56,7 +56,7 @@ from django.utils.dateparse import parse_date
 
 from AdminApp.services import create_lead_for_company, get_related_label, notify_user
 
-from .models import MetaIntegration, Notification, NotificationPreference
+from .models import MetaIntegration, Notification, NotificationPreference, TwilioSettings
 
 logger = logging.getLogger(__name__)
 
@@ -5852,6 +5852,89 @@ def change_password(request):
 
 
 
+# .............. twilio settings ...................
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_twilio_settings(request):
+    company = getattr(request, "company", None) or getattr(getattr(request.user, "staff", None), "company", None)
+    if not company:
+        return Response({"error": "No company associated with user"}, status=400)
+    try:
+        settings_obj = TwilioSettings.objects.get(company=company)
+    except TwilioSettings.DoesNotExist:
+        return Response({"connected": False})
+
+    return Response({
+        "connected": settings_obj.is_active,
+        "account_sid": settings_obj.account_sid,
+        "caller_id": settings_obj.caller_id,
+        # never return the auth token, even encrypted, to the frontend
+        "last_verified_at": settings_obj.last_verified_at,
+    })
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def save_twilio_settings(request):
+    """
+    Body:
+    {
+      "account_sid": "AC...",
+      "auth_token": "...",
+      "caller_id": "+17372508034"
+    }
+    """
+    company = getattr(request, "company", None) or getattr(getattr(request.user, "staff", None), "company", None)
+    if not company:
+        return Response({"error": "No company associated with user"}, status=400)
+
+    account_sid = request.data.get("account_sid", "").strip()
+    auth_token = request.data.get("auth_token", "").strip()
+    caller_id = request.data.get("caller_id", "").strip()
+
+    existing_settings = TwilioSettings.objects.filter(company=company).first()
+    if not auth_token and existing_settings and existing_settings.auth_token_encrypted:
+        try:
+            auth_token = existing_settings.auth_token
+        except Exception:
+            pass
+
+    if not account_sid or not auth_token or not caller_id:
+        return Response({"error": "account_sid, auth_token, and caller_id are all required"}, status=400)
+
+    if Client is None:
+        return Response({"error": "Twilio library is not installed on the server."}, status=500)
+
+    # Validate credentials actually work before saving them as active
+    try:
+        test_client = Client(account_sid, auth_token)
+        test_client.api.accounts(account_sid).fetch()
+    except TwilioRestException as e:
+        return Response({"error": f"Twilio rejected these credentials: {e.msg}"}, status=400)
+    except Exception as e:
+        return Response({"error": f"Couldn't verify credentials: {str(e)}"}, status=400)
+
+    settings_obj, _ = TwilioSettings.objects.get_or_create(company=company)
+    settings_obj.account_sid = account_sid
+    settings_obj.auth_token = auth_token  # uses the setter, encrypts automatically
+    settings_obj.caller_id = caller_id
+    settings_obj.is_active = True
+    settings_obj.last_verified_at = timezone.now()
+    settings_obj.save()
+
+    return Response({"connected": True, "message": "Twilio account connected successfully"})
+
+
+@api_view(["POST", "DELETE"])
+@permission_classes([IsAuthenticated])
+def disconnect_twilio(request):
+    company = getattr(request, "company", None) or getattr(getattr(request.user, "staff", None), "company", None)
+    if not company:
+        return Response({"error": "No company associated with user"}, status=400)
+    TwilioSettings.objects.filter(company=company).delete()
+    return Response({"connected": False, "message": "Twilio account disconnected successfully"})
+
+
 # .............. call through twilio ................
 TRIAL_ACCOUNT_ERROR_CODES = {
     21219: "This number isn't verified for your Twilio trial account. "
@@ -5863,15 +5946,27 @@ TRIAL_ACCOUNT_ERROR_CODES = {
 }
  
  
-def get_twilio_client():
-    return Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
- 
- 
-def validate_twilio_request(request):
+def get_twilio_client_for_company(company):
+    """
+    Returns (client, twilio_settings) for an active, connected company,
+    or (None, None) if the company hasn't connected Twilio yet.
+    """
+    try:
+        twilio_settings = TwilioSettings.objects.get(company=company, is_active=True)
+    except TwilioSettings.DoesNotExist:
+        return None, None
+
+    if Client is None:
+        return None, None
+
+    return Client(twilio_settings.account_sid, twilio_settings.auth_token), twilio_settings
+
+
+def validate_twilio_request(request, auth_token):
     if getattr(settings, "DEBUG", False):
         return True
     try:
-        validator = RequestValidator(settings.TWILIO_AUTH_TOKEN)
+        validator = RequestValidator(auth_token)
         signature = request.headers.get("X-Twilio-Signature", "")
         url = request.build_absolute_uri()
         params = request.POST.dict() if request.method == "POST" else {}
@@ -5891,17 +5986,13 @@ def normalize_e164_phone(raw_phone, default_country_code="+91"):
         return clean
     if clean.startswith("00"):
         return "+" + clean[2:]
-    # If starts with leading zero and is 11 digits (e.g. 09876543210 -> 9876543210)
     if clean.startswith("0") and len(clean) == 11:
         clean = clean[1:]
-    # If standard 10 digit local phone number, prepend default country code (e.g. +91)
     if len(clean) == 10:
         cc = default_country_code if default_country_code.startswith("+") else f"+{default_country_code}"
         return f"{cc}{clean}"
-    # If 12 digits starting with 91, prepend '+'
     if len(clean) == 12 and clean.startswith("91"):
         return f"+{clean}"
-    # Fallback: prepend '+'
     return f"+{clean}"
 
 
@@ -5915,9 +6006,9 @@ def dial_out(request):
     Body:
     {
       "to_number": "+91XXXXXXXXXX",
-      "subject": "Follow-up on quote",   # optional, defaults to "Call to <number>"
+      "subject": "Follow-up on quote",
       "lead_id": null,
-      "contact_id": null,   # Customer
+      "contact_id": null,
       "deal_id": null,
       "account_id": null,
       "case_id": null
@@ -5936,7 +6027,6 @@ def dial_out(request):
         if not raw_to_number:
             return Response({"error": "to_number is required"}, status=400)
 
-        # Sanitize and normalize destination phone number to E.164 (e.g. +91XXXXXXXXXX)
         to_number = normalize_e164_phone(raw_to_number)
         if not to_number:
             return Response({"error": "Invalid destination phone number provided"}, status=400)
@@ -5948,7 +6038,6 @@ def dial_out(request):
                 status=400,
             )
 
-        # Sanitize and normalize staff phone number to E.164
         staff_phone = normalize_e164_phone(staff_raw_phone)
         if not staff_phone:
             return Response(
@@ -5962,25 +6051,24 @@ def dial_out(request):
                 status=500,
             )
 
-        if not getattr(settings, "TWILIO_ACCOUNT_SID", None) or not getattr(settings, "TWILIO_AUTH_TOKEN", None) or not getattr(settings, "TWILIO_CALLER_ID", None):
+        client, twilio_settings = get_twilio_client_for_company(company)
+        if not client:
             return Response(
-                {"error": "Twilio credentials are not configured on the backend server (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, or TWILIO_CALLER_ID missing in environment)."},
-                status=500,
+                {"error": "Twilio isn't connected for your company yet. Go to Calling Settings to connect your Twilio account."},
+                status=400,
             )
-
-        client = get_twilio_client()
 
         backend_base = getattr(settings, "BACKEND_BASE_URL", "https://crm-backend-ejfr.onrender.com").rstrip("/")
 
         try:
             call = client.calls.create(
                 to=staff_phone,
-                from_=settings.TWILIO_CALLER_ID,
+                from_=twilio_settings.caller_id,
                 url=(
                     f"{backend_base}/api/admin/calls/connect-twiml/"
-                    f"?lead_number={to_number}"
+                    f"?lead_number={to_number}&company_id={company.id}"
                 ),
-                status_callback=f"{backend_base}/api/admin/calls/status-callback/",
+                status_callback=f"{backend_base}/api/admin/calls/status-callback/?company_id={company.id}",
                 status_callback_event=["initiated", "ringing", "answered", "completed"],
                 status_callback_method="POST",
             )
@@ -5998,7 +6086,7 @@ def dial_out(request):
             case_id=request.data.get("case_id"),
             subject=request.data.get("subject") or f"Call to {to_number}",
             call_type="outbound",
-            status="follow up",  # sensible default until Twilio reports a final status
+            status="follow up",
             duration=0,
             start_time=timezone.now(),
             assigned_to=staff,
@@ -6007,7 +6095,7 @@ def dial_out(request):
             deal_id=request.data.get("deal_id"),
             account_id=request.data.get("account_id"),
             call_sid=call.sid,
-            from_number=settings.TWILIO_CALLER_ID or "",
+            from_number=twilio_settings.caller_id,
             to_number=to_number,
             twilio_status="initiated",
         )
@@ -6016,8 +6104,8 @@ def dial_out(request):
     except Exception as e:
         logger.exception("dial_out unexpected error")
         return Response({"error": f"Server error: {str(e)}"}, status=500)
- 
- 
+
+
 # ---------------------------------------------------------------------------
 # 2. Twilio calls the agent; once answered, hits this to bridge to the lead
 # ---------------------------------------------------------------------------
@@ -6025,24 +6113,37 @@ def dial_out(request):
 @authentication_classes([])
 @permission_classes([AllowAny])
 def connect_twiml(request):
-    if not validate_twilio_request(request):
+    company_id = request.GET.get("company_id") or request.POST.get("company_id")
+
+    response = VoiceResponse()
+
+    if not company_id:
+        response.say("Configuration error. Goodbye.")
+        return HttpResponse(str(response), content_type="text/xml")
+
+    try:
+        twilio_settings = TwilioSettings.objects.get(company_id=company_id, is_active=True)
+    except TwilioSettings.DoesNotExist:
+        response.say("Configuration error. Goodbye.")
+        return HttpResponse(str(response), content_type="text/xml")
+
+    if not validate_twilio_request(request, twilio_settings.auth_token):
         return HttpResponseForbidden("Invalid Twilio signature")
- 
+
     raw_lead_number = request.GET.get("lead_number") or request.POST.get("lead_number")
     lead_number = normalize_e164_phone(raw_lead_number)
- 
-    response = VoiceResponse()
+
     if not lead_number:
         response.say("No destination number was provided. Goodbye.")
         return HttpResponse(str(response), content_type="text/xml")
- 
-    dial = Dial(caller_id=settings.TWILIO_CALLER_ID)
+
+    dial = Dial(caller_id=twilio_settings.caller_id)
     dial.number(lead_number)
     response.append(dial)
- 
+
     return HttpResponse(str(response), content_type="text/xml")
- 
- 
+
+
 # ---------------------------------------------------------------------------
 # 3. Twilio posts status updates here as the call progresses
 # ---------------------------------------------------------------------------
@@ -6050,22 +6151,31 @@ def connect_twiml(request):
 @authentication_classes([])
 @permission_classes([AllowAny])
 def call_status_callback(request):
-    if not validate_twilio_request(request):
+    company_id = request.GET.get("company_id") or request.POST.get("company_id")
+    if not company_id:
+        return Response({"error": "company_id missing"}, status=400)
+
+    try:
+        twilio_settings = TwilioSettings.objects.get(company_id=company_id, is_active=True)
+    except TwilioSettings.DoesNotExist:
+        return Response({"error": "No active Twilio settings for this company"}, status=404)
+
+    if not validate_twilio_request(request, twilio_settings.auth_token):
         return HttpResponseForbidden("Invalid Twilio signature")
- 
+
     call_sid = request.data.get("CallSid")
     twilio_status = request.data.get("CallStatus")
     duration_seconds = request.data.get("CallDuration")
     error_code = request.data.get("ErrorCode")
- 
+
     if not call_sid:
         return Response({"error": "CallSid missing"}, status=400)
- 
+
     try:
         call_record = Call.objects.get(call_sid=call_sid)
     except Call.DoesNotExist:
         return Response({"error": "No matching Call record"}, status=404)
- 
+
     if twilio_status:
         call_record.twilio_status = twilio_status
     if duration_seconds:
@@ -6074,13 +6184,12 @@ def call_status_callback(request):
         call_record.error_message = TRIAL_ACCOUNT_ERROR_CODES.get(
             int(error_code), f"Twilio error code {error_code}"
         )
- 
+
     call_record.sync_status_from_twilio()
     call_record.save()
- 
+
     return Response({"ok": True})
- 
- 
+
 # ---------------------------------------------------------------------------
 # 4. Call history for a lead/contact/deal/account
 # ---------------------------------------------------------------------------
