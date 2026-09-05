@@ -5899,69 +5899,92 @@ def dial_out(request):
       "case_id": null
     }
     """
-    staff = request.user.staff
-    company = staff.company
-
-    raw_to_number = request.data.get("to_number")
-    if not raw_to_number:
-        return Response({"error": "to_number is required"}, status=400)
-
-    # Sanitize phone numbers: remove spaces, dashes, parentheses but retain '+'
-    to_number = re.sub(r"[^\d+]", "", str(raw_to_number).strip())
-    if not to_number:
-        return Response({"error": "Invalid phone number provided"}, status=400)
-
-    if not staff.phone_number:
-        return Response(
-            {"error": "No phone number on file for your account. Please add your phone number in your profile settings."},
-            status=400,
-        )
-
-    staff_phone = re.sub(r"[^\d+]", "", str(staff.phone_number).strip())
-    client = get_twilio_client()
-
-    backend_base = getattr(settings, "BACKEND_BASE_URL", "https://crm-backend-ejfr.onrender.com").rstrip("/")
-
     try:
-        call = client.calls.create(
-            to=staff_phone,
-            from_=settings.TWILIO_CALLER_ID,
-            url=(
-                f"{backend_base}/api/admin/calls/connect-twiml/"
-                f"?lead_number={to_number}"
-            ),
-            status_callback=f"{backend_base}/api/admin/calls/status-callback/",
-            status_callback_event=["initiated", "ringing", "answered", "completed"],
-            status_callback_method="POST",
+        staff = getattr(request.user, "staff", None)
+        if not staff:
+            return Response(
+                {"error": "No staff profile associated with this user account."},
+                status=400,
+            )
+        company = staff.company
+
+        raw_to_number = request.data.get("to_number")
+        if not raw_to_number:
+            return Response({"error": "to_number is required"}, status=400)
+
+        # Sanitize phone numbers: remove spaces, dashes, parentheses but retain '+'
+        to_number = re.sub(r"[^\d+]", "", str(raw_to_number).strip())
+        if not to_number:
+            return Response({"error": "Invalid phone number provided"}, status=400)
+
+        if not staff.phone_number:
+            return Response(
+                {"error": "No phone number on file for your staff account. Please add your phone number in your profile settings."},
+                status=400,
+            )
+
+        staff_phone = re.sub(r"[^\d+]", "", str(staff.phone_number).strip())
+
+        if Client is None:
+            return Response(
+                {"error": "Twilio library is not installed on the server."},
+                status=500,
+            )
+
+        if not getattr(settings, "TWILIO_ACCOUNT_SID", None) or not getattr(settings, "TWILIO_AUTH_TOKEN", None) or not getattr(settings, "TWILIO_CALLER_ID", None):
+            return Response(
+                {"error": "Twilio credentials are not configured on the backend server (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, or TWILIO_CALLER_ID missing in environment)."},
+                status=500,
+            )
+
+        client = get_twilio_client()
+
+        backend_base = getattr(settings, "BACKEND_BASE_URL", "https://crm-backend-ejfr.onrender.com").rstrip("/")
+
+        try:
+            call = client.calls.create(
+                to=staff_phone,
+                from_=settings.TWILIO_CALLER_ID,
+                url=(
+                    f"{backend_base}/api/admin/calls/connect-twiml/"
+                    f"?lead_number={to_number}"
+                ),
+                status_callback=f"{backend_base}/api/admin/calls/status-callback/",
+                status_callback_event=["initiated", "ringing", "answered", "completed"],
+                status_callback_method="POST",
+            )
+        except TwilioRestException as e:
+            friendly = TRIAL_ACCOUNT_ERROR_CODES.get(e.code)
+            if friendly:
+                return Response({"error": friendly, "twilio_code": e.code}, status=400)
+            return Response({"error": f"Twilio error: {e.msg}", "twilio_code": e.code}, status=502)
+        except Exception as e:
+            logger.exception("Twilio call creation failed")
+            return Response({"error": f"Failed to place call via Twilio: {str(e)}"}, status=502)
+
+        call_record = Call.objects.create(
+            company=company,
+            case_id=request.data.get("case_id"),
+            subject=request.data.get("subject") or f"Call to {to_number}",
+            call_type="outbound",
+            status="follow up",  # sensible default until Twilio reports a final status
+            duration=0,
+            start_time=timezone.now(),
+            assigned_to=staff,
+            lead_id=request.data.get("lead_id"),
+            contact_id=request.data.get("contact_id"),
+            deal_id=request.data.get("deal_id"),
+            account_id=request.data.get("account_id"),
+            call_sid=call.sid,
+            from_number=settings.TWILIO_CALLER_ID or "",
+            to_number=to_number,
+            twilio_status="initiated",
         )
-    except TwilioRestException as e:
-        friendly = TRIAL_ACCOUNT_ERROR_CODES.get(e.code)
-        if friendly:
-            return Response({"error": friendly, "twilio_code": e.code}, status=400)
-        return Response({"error": f"Twilio error: {e.msg}", "twilio_code": e.code}, status=502)
+
+        return Response({"call_sid": call.sid, "call_id": call_record.id, "status": "initiated"})
     except Exception as e:
-        return Response({"error": f"Failed to place call: {str(e)}"}, status=502)
-
-    call_record = Call.objects.create(
-        company=company,
-        case_id=request.data.get("case_id"),
-        subject=request.data.get("subject") or f"Call to {to_number}",
-        call_type="outbound",
-        status="follow up",  # sensible default until Twilio reports a final status
-        duration=0,
-        start_time=timezone.now(),
-        assigned_to=staff,
-        lead_id=request.data.get("lead_id"),
-        contact_id=request.data.get("contact_id"),
-        deal_id=request.data.get("deal_id"),
-        account_id=request.data.get("account_id"),
-        call_sid=call.sid,
-        from_number=settings.TWILIO_CALLER_ID or "",
-        to_number=to_number,
-        twilio_status="initiated",
-    )
-
-    return Response({"call_sid": call.sid, "call_id": call_record.id, "status": "initiated"})
+        logger.exception("dial_out unexpected error")
+        return Response({"error": f"Server error: {str(e)}"}, status=500)
  
  
 # ---------------------------------------------------------------------------
