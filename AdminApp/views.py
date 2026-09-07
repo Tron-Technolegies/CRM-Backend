@@ -5914,13 +5914,17 @@ def save_twilio_settings(request):
     except Exception as e:
         return Response({"error": f"Couldn't verify credentials: {str(e)}"}, status=400)
 
-    settings_obj, _ = TwilioSettings.objects.get_or_create(company=company)
-    settings_obj.account_sid = account_sid
-    settings_obj.auth_token = auth_token  # uses the setter, encrypts automatically
-    settings_obj.caller_id = caller_id
-    settings_obj.is_active = True
-    settings_obj.last_verified_at = timezone.now()
-    settings_obj.save()
+    try:
+        settings_obj, _ = TwilioSettings.objects.get_or_create(company=company)
+        settings_obj.account_sid = account_sid
+        settings_obj.auth_token = auth_token  # uses the setter, encrypts automatically
+        settings_obj.caller_id = caller_id
+        settings_obj.is_active = True
+        settings_obj.last_verified_at = timezone.now()
+        settings_obj.save()
+    except Exception as e:
+        logger.exception("Failed to save Twilio settings")
+        return Response({"error": f"Failed to save settings: {str(e)}"}, status=500)
 
     return Response({"connected": True, "message": "Twilio account connected successfully"})
 
