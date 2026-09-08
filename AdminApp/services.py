@@ -24,6 +24,20 @@ def get_related_label(related_type, lead=None, contact=None, deal=None, account=
     return None
 
 
+import threading
+
+def _send_email_async(subject, message, from_email, recipient_list):
+    try:
+        send_mail(
+            subject=subject,
+            message=message,
+            from_email=from_email,
+            recipient_list=recipient_list,
+            fail_silently=True,
+        )
+    except Exception as e:
+        logger.warning(f"Async email sending failed: {e}")
+
 def notify_user(
     *,
     company,
@@ -32,10 +46,29 @@ def notify_user(
     title,
     message,
 ):
+    from django.contrib.auth.models import User as AuthUser
+    from AdminApp.models import Staff as StaffModel
+
+    target_user = None
+    target_email = None
+
+    if isinstance(user, AuthUser):
+        target_user = user
+        target_email = user.email
+    elif isinstance(user, StaffModel):
+        target_user = user.user or AuthUser.objects.filter(email__iexact=user.email).first()
+        target_email = user.email or (target_user.email if target_user else None)
+    elif user is not None:
+        target_user = getattr(user, "user", None) or user
+        target_email = getattr(user, "email", None)
+
+    if not target_user:
+        logger.warning(f"Could not find User for notification: {user}")
+        return None
 
     notification = Notification.objects.create(
         company=company,
-        user=user,
+        user=target_user,
         notification_type=notification_type,
         title=title,
         message=message,
@@ -43,7 +76,7 @@ def notify_user(
 
     preference, _ = NotificationPreference.objects.get_or_create(
         company=company,
-        user=user,
+        user=target_user,
     )
 
     send_email = False
@@ -84,14 +117,13 @@ def notify_user(
     else:
         send_email = True
 
-    if send_email:
-        send_mail(
-            subject=title,
-            message=message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[user.email],
-            fail_silently=False,
+    if send_email and target_email:
+        thread = threading.Thread(
+            target=_send_email_async,
+            args=(title, message, settings.DEFAULT_FROM_EMAIL, [target_email]),
+            daemon=True,
         )
+        thread.start()
 
     return notification
 

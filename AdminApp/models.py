@@ -5,7 +5,9 @@ import uuid
 from django.db import models
 from django.contrib.auth.models import User
 from django.conf import settings as django_settings
+from cloudinary.models import CloudinaryField
 
+from AdminApp.crypto_utils import decrypt_value, encrypt_value
 
 
 class Company(models.Model):
@@ -37,13 +39,14 @@ class Staff(models.Model):
     email = models.EmailField(unique=True)
     role = models.CharField(max_length=50, choices=ROLE_CHOICES, blank=True, default="")
     department = models.CharField(max_length=100, blank=True, default="")
-    profile_type = models.CharField(max_length=100, blank=True, default="")
 
     mobile = models.CharField(max_length=20, blank=True, default="")
     website = models.CharField(max_length=255, blank=True, default="")
     fax = models.CharField(max_length=50, blank=True, default="")
     alias = models.CharField(max_length=100, blank=True, default="")
     date_of_birth = models.DateField(null=True, blank=True)
+
+    profile_picture = CloudinaryField('image', blank=True, null=True)
 
     address = models.OneToOneField("Address", on_delete=models.SET_NULL, null=True, blank=True, related_name="staff")
 
@@ -765,11 +768,45 @@ class Call(models.Model):
     deal = models.ForeignKey(Deal, null=True, blank=True, on_delete=models.SET_NULL, related_name="calls")
     account = models.ForeignKey(Accounts, null=True, blank=True, on_delete=models.SET_NULL, related_name="calls")
 
+    # --- Twilio integration fields ---
+    call_sid = models.CharField(max_length=64, blank=True, null=True, unique=True, db_index=True)
+    from_number = models.CharField(max_length=20, blank=True)
+    to_number = models.CharField(max_length=20, blank=True)
+    twilio_status = models.CharField(
+        max_length=20, blank=True,
+        help_text="Raw status from Twilio: queued, ringing, in-progress, completed, busy, failed, no-answer, canceled",
+    )
+    twilio_duration_seconds = models.PositiveIntegerField(
+        null=True, blank=True, help_text="Raw call duration from Twilio, in seconds"
+    )
+    error_message = models.CharField(
+        max_length=255, blank=True,
+        help_text="Populated if Twilio reports a failure (e.g. trial account unverified-number error)",
+    )
+ 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-
+ 
     def __str__(self):
         return self.subject
+ 
+    def sync_status_from_twilio(self):
+        """Maps Twilio's raw call status to this model's business-facing STATUS
+        choices, and converts duration from seconds to minutes. Call this
+        whenever twilio_status or twilio_duration_seconds changes."""
+        status_map = {
+            "completed": "completed",
+            "no-answer": "missed",
+            "busy": "missed",
+            "failed": "cancelled",
+            "canceled": "cancelled",
+        }
+        if self.twilio_status in status_map:
+            self.status = status_map[self.twilio_status]
+ 
+        if self.twilio_duration_seconds:
+            self.duration = max(1, round(self.twilio_duration_seconds / 60))
+ 
     
 
 
@@ -1147,3 +1184,26 @@ class MetaIntegration(models.Model):
 
     def __str__(self):
         return f"{self.company.name} - Meta Ads"
+
+
+
+class TwilioSettings(models.Model):
+    company = models.OneToOneField(Company, on_delete=models.CASCADE, related_name="twilio_settings")
+    account_sid = models.CharField(max_length=64)
+    auth_token_encrypted = models.CharField(max_length=512)
+    caller_id = models.CharField(max_length=20)  # E.164 format, e.g. +17372508034
+    is_active = models.BooleanField(default=False)
+    last_verified_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @property
+    def auth_token(self) -> str:
+        return decrypt_value(self.auth_token_encrypted)
+
+    @auth_token.setter
+    def auth_token(self, raw_value: str):
+        self.auth_token_encrypted = encrypt_value(raw_value)
+
+    def __str__(self):
+        return f"Twilio settings for {self.company}"

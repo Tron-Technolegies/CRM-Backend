@@ -2,22 +2,36 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import secrets
 import string
 import traceback
 from urllib.parse import urlencode
-from venv import logger
+
+try:
+    from twilio.rest import Client
+    from twilio.base.exceptions import TwilioRestException
+    from twilio.request_validator import RequestValidator
+    from twilio.twiml.voice_response import VoiceResponse, Dial
+except ImportError:
+    Client = None
+    TwilioRestException = Exception
+    RequestValidator = None
+    VoiceResponse = None
+    Dial = None
+logger = logging.getLogger(__name__)
 from django.core import signing
 from django.shortcuts import redirect
 from .jaas import generate_jaas_jwt
 from django.utils import timezone
 from django.tasks import task
 from django.utils import json, timezone
-from django.http import HttpResponse, JsonResponse
+from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, render
 import requests
-from rest_framework.permissions import AllowAny
-from rest_framework.decorators import api_view, authentication_classes, permission_classes
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.decorators import api_view, authentication_classes, permission_classes, parser_classes
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db.models import Sum
 from django.db.models.functions import TruncWeek
 from django.db.models import Count
@@ -45,8 +59,15 @@ from django.utils.dateparse import parse_date
 
 from AdminApp.services import create_lead_for_company, get_related_label, notify_user
 
-from .models import MetaIntegration
-from .models import Meeting, MeetingParticipant, MeetingAttendeeLog
+from .models import (
+    MetaIntegration,
+    Meeting,
+    MeetingParticipant,
+    MeetingAttendeeLog,
+    Notification,
+    NotificationPreference,
+    TwilioSettings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -335,7 +356,7 @@ def meta_connect(request):
     params = {
         "client_id": settings.META_APP_ID,
         "redirect_uri": settings.META_REDIRECT_URI,
-        "config_id": settings.META_CONFIG_ID,
+        "scope": "public_profile,email,ads_management,ads_read",
         "state": state,
         "response_type": "code",
     }
@@ -741,11 +762,11 @@ def update_lead(request, id):
     try:
         lead.save()
 
-        if lead.assigned_to and lead.assigned_to_id != previous_staff_id and lead.assigned_to.user:
+        if lead.assigned_to and lead.assigned_to_id != previous_staff_id:
             try:
                 notify_user(
                     company=request.company,
-                    user=lead.assigned_to.user,
+                    user=lead.assigned_to,
                     notification_type="lead_assigned",
                     title="Lead Assigned to You",
                     message=(
@@ -776,12 +797,12 @@ def delete_lead(request, id):
 
 # ...............deal....................
 # ............ add lead id in add deal ..............
-from .models import Deal, Lead, Customer, Notification, NotificationPreference, Staff
-from .models import Accounts  # adjust import path/name to match your app
+from .models import (Deal, Customer, Staff, Accounts,)
 
 
 def serialize_deal(deal):
     related = None
+
     if deal.customer_id:
         related = {
             "type": "customer",
@@ -801,7 +822,11 @@ def serialize_deal(deal):
         "company_name": deal.company_name,
         "stage": deal.stage,
         "value": float(deal.deal_amount) if deal.deal_amount else 0,
-        "expectedCloseDate": str(deal.expected_close_date) if deal.expected_close_date else "—",
+        "expectedCloseDate": (
+            str(deal.expected_close_date)
+            if deal.expected_close_date
+            else "—"
+        ),
         "assignedTo": deal.assigned_to.full_name if deal.assigned_to else "—",
         "assignedToId": deal.assigned_to.id if deal.assigned_to else None,
         "source": deal.deal_source,
@@ -813,37 +838,57 @@ def serialize_deal(deal):
 
 
 def _resolve_related(request, related_type, related_id):
-    """Returns (customer, account, error_message)."""
-    if related_type == "customer" and related_id:
-        customer = Customer.objects.filter(id=related_id, company=request.company).first()
+    if related_type == "customer":
+        customer = Customer.objects.filter(
+            id=related_id,
+            company=request.company
+        ).first()
+
         if not customer:
             return None, None, "Customer not found"
+
         return customer, None, None
 
-    if related_type == "account" and related_id:
-        account = Accounts.objects.filter(id=related_id, company=request.company).first()
+    if related_type == "account":
+        account = Accounts.objects.filter(
+            id=related_id,
+            company=request.company
+        ).first()
+
         if not account:
             return None, None, "Account not found"
+
         return None, account, None
 
-    # empty/"none"/None → clear both
-    return None, None, None
+    return None, None, "A deal must be linked to a Customer or an Account"
 
 
-@api_view(['POST'])
+@api_view(["POST"])
 def add_deal(request):
     deal_name = request.data.get("deal_name")
     company_name = request.data.get("company_name")
     deal_amount = request.data.get("deal_amount")
     stage = request.data.get("stage")
-    assigned_to = request.data.get("assigned_to")
-    expected_close_date = request.data.get("expected_close_date")
+    assigned_to_id = request.data.get("assigned_to")
+    expected_close_date = (
+        request.data.get("expected_close_date")
+        or request.data.get("expected_closing_date")
+        or request.data.get("expectedCloseDate")
+    )
     deal_source = request.data.get("deal_source")
     priority = request.data.get("priority")
     deal_description = request.data.get("deal_description")
 
     related_type = request.data.get("related_type")
     related_id = request.data.get("related_id")
+
+    if not related_type or not related_id:
+        if request.data.get("customer_id"):
+            related_type = "customer"
+            related_id = request.data.get("customer_id")
+        elif request.data.get("account_id"):
+            related_type = "account"
+            related_id = request.data.get("account_id")
 
     if not deal_name or not company_name:
         return HttpResponse(
@@ -857,9 +902,31 @@ def add_deal(request):
             status=400
         )
 
-    customer, account, err = _resolve_related(request, related_type, related_id)
-    if err:
-        return HttpResponse(err, status=404)
+    customer, account, error = _resolve_related(
+        request,
+        related_type,
+        related_id
+    )
+
+    if error:
+        return HttpResponse(
+            error,
+            status=404
+        )
+
+    assigned_to = None
+
+    if assigned_to_id:
+        assigned_to = Staff.objects.filter(
+            id=assigned_to_id,
+            company=request.company
+        ).first()
+
+        if not assigned_to:
+            return HttpResponse(
+                "Assigned staff member not found",
+                status=404
+            )
 
     try:
         deal = Deal.objects.create(
@@ -868,7 +935,7 @@ def add_deal(request):
             company_name=company_name,
             deal_amount=deal_amount,
             stage=stage,
-            assigned_to_id=assigned_to,
+            assigned_to=assigned_to,
             expected_close_date=expected_close_date,
             deal_source=deal_source,
             priority=priority,
@@ -877,11 +944,11 @@ def add_deal(request):
             account=account,
         )
 
-        if deal.assigned_to and deal.assigned_to.user:
+        if deal.assigned_to:
             try:
                 notify_user(
                     company=request.company,
-                    user=deal.assigned_to.user,
+                    user=deal.assigned_to,
                     notification_type="deal_assigned",
                     title="New Deal Assigned",
                     message=(
@@ -895,38 +962,61 @@ def add_deal(request):
                     ),
                 )
             except Exception:
-                logger.exception("Failed to notify staff for deal %s", deal.id)
+                logger.exception(
+                    "Failed to notify staff for deal %s",
+                    deal.id
+                )
 
-        return HttpResponse("Deal created successfully", status=201)
+        return HttpResponse(
+            "Deal created successfully",
+            status=201
+        )
 
     except Exception as e:
+        logger.exception("Failed to create deal")
         return HttpResponse(str(e), status=500)
 
 
-@api_view(['GET'])
+@api_view(["GET"])
 def view_deals(request):
     deals = (
         Deal.objects
         .filter(company=request.company)
-        .select_related('assigned_to', 'customer', 'account')
-        .order_by('-updated_at')
+        .select_related("assigned_to", "customer", "account")
+        .order_by("-updated_at")
     )
-    return JsonResponse([serialize_deal(d) for d in deals], safe=False)
+
+    return JsonResponse(
+        [serialize_deal(deal) for deal in deals],
+        safe=False
+    )
 
 
-@api_view(['GET'])
+@api_view(["GET"])
 def view_single_deals(request, id):
     deal = get_object_or_404(
-        Deal.objects.select_related('assigned_to', 'customer', 'account'),
-        id=id, company=request.company
+        Deal.objects.select_related(
+            "assigned_to",
+            "customer",
+            "account"
+        ),
+        id=id,
+        company=request.company
     )
-    return JsonResponse(serialize_deal(deal), safe=False)
+
+    return JsonResponse(
+        serialize_deal(deal),
+        safe=False
+    )
 
 
-@api_view(['PUT'])
+@api_view(["PUT"])
 def update_deal(request, id):
     try:
-        deal = Deal.objects.get(id=id, company=request.company)
+        deal = Deal.objects.get(
+            id=id,
+            company=request.company
+        )
     except Deal.DoesNotExist:
         return HttpResponse("Deal not found", status=404)
 
@@ -934,18 +1024,42 @@ def update_deal(request, id):
 
     deal.deal_name = request.data.get("deal_name") or deal.deal_name
     deal.company_name = request.data.get("company_name") or deal.company_name
-    deal.deal_amount = request.data.get("deal_amount") or deal.deal_amount
+    deal.deal_amount = (
+        request.data.get("deal_amount")
+        if request.data.get("deal_amount") is not None
+        else deal.deal_amount
+    )
     deal.stage = request.data.get("stage") or deal.stage
-    deal.expected_close_date = request.data.get("expected_close_date") or deal.expected_close_date
+    deal.expected_close_date = (
+        request.data.get("expected_close_date")
+        or deal.expected_close_date
+    )
     deal.deal_source = request.data.get("deal_source") or deal.deal_source
     deal.priority = request.data.get("priority") or deal.priority
-    deal.deal_description = request.data.get("deal_description") or deal.deal_description
+    deal.deal_description = (
+        request.data.get("deal_description")
+        if request.data.get("deal_description") is not None
+        else deal.deal_description
+    )
 
-    assigned_to_id = request.data.get("assigned_to")
-    if assigned_to_id:
-        deal.assigned_to = get_object_or_404(Staff, id=assigned_to_id)
-    else:
-        deal.assigned_to = None
+    if "assigned_to" in request.data:
+        assigned_to_id = request.data.get("assigned_to")
+
+        if assigned_to_id:
+            assigned_to = Staff.objects.filter(
+                id=assigned_to_id,
+                company=request.company
+            ).first()
+
+            if not assigned_to:
+                return HttpResponse(
+                    "Assigned staff member not found",
+                    status=404
+                )
+
+            deal.assigned_to = assigned_to
+        else:
+            deal.assigned_to = None
 
     if "related_type" in request.data:
         related_type = request.data.get("related_type")
@@ -957,9 +1071,14 @@ def update_deal(request, id):
                 status=400
             )
 
-        customer, account, err = _resolve_related(request, related_type, related_id)
-        if err:
-            return HttpResponse(err, status=404)
+        customer, account, error = _resolve_related(
+            request,
+            related_type,
+            related_id
+        )
+
+        if error:
+            return HttpResponse(error, status=404)
 
         deal.customer = customer
         deal.account = account
@@ -967,11 +1086,14 @@ def update_deal(request, id):
     try:
         deal.save()
 
-        if deal.assigned_to and deal.assigned_to_id != previous_staff_id and deal.assigned_to.user:
+        if (
+            deal.assigned_to
+            and deal.assigned_to_id != previous_staff_id
+        ):
             try:
                 notify_user(
                     company=request.company,
-                    user=deal.assigned_to.user,
+                    user=deal.assigned_to,
                     notification_type="deal_assigned",
                     title="Deal Assigned to You",
                     message=(
@@ -985,19 +1107,34 @@ def update_deal(request, id):
                     ),
                 )
             except Exception:
-                logger.exception("Failed to notify staff for reassigned deal %s", deal.id)
+                logger.exception(
+                    "Failed to notify staff for reassigned deal %s",
+                    deal.id
+                )
 
-        return HttpResponse("Deal updated successfully", status=200)
+        return HttpResponse(
+            "Deal updated successfully",
+            status=200
+        )
+
     except Exception as e:
+        logger.exception("Failed to update deal %s", id)
         return HttpResponse(str(e), status=500)
 
 
-@api_view(['DELETE'])
+@api_view(["DELETE"])
 def delete_deal(request, id):
-    deal = get_object_or_404(Deal, id=id, company=request.company)
-    deal.delete()
-    return JsonResponse({"message": "successfully deleted"})
+    deal = get_object_or_404(
+        Deal,
+        id=id,
+        company=request.company
+    )
 
+    deal.delete()
+
+    return JsonResponse({
+        "message": "Successfully deleted"
+    })
 
 
 # ...................customer...................
@@ -1233,12 +1370,12 @@ def add_task(request):
         return JsonResponse({"error": str(e)}, status=500)
 
     # Notification failure shouldn't undo a successful task creation
-    if staff and staff.user:
+    if staff:
         related_label = get_related_label(related_type, lead, contact, deal, account)
         try:
             notify_user(
                 company=request.company,
-                user=staff.user,
+                user=staff,
                 notification_type="task_assigned",
                 title="New Task Assigned",
                 message=(
@@ -1394,8 +1531,30 @@ def update_task(request, id):
         except (Lead.DoesNotExist, Customer.DoesNotExist, Deal.DoesNotExist, Accounts.DoesNotExist):
             return HttpResponse("Invalid related record", status=400)
 
+    previous_staff_id = task.assigned_to_id
+
     try:
         task.save()
+
+        if task.assigned_to and task.assigned_to_id != previous_staff_id:
+            try:
+                notify_user(
+                    company=request.company,
+                    user=task.assigned_to,
+                    notification_type="task_assigned",
+                    title="Task Assigned to You",
+                    message=(
+                        f"Hello {task.assigned_to.full_name},\n\n"
+                        f"A task has been assigned to you.\n\n"
+                        f"Task: {task.title}\n"
+                        f"Priority: {task.priority}\n"
+                        f"Due Date: {task.due_date}\n\n"
+                        f"Please log in to the CRM to view the task details."
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify staff for reassigned task %s", task.id)
+
         return HttpResponse("Task updated successfully", status=200)
     except Exception as e:
         return HttpResponse(str(e), status=500)
@@ -1620,6 +1779,63 @@ def report_view(request):
 
     return JsonResponse(report)
 
+
+@api_view(["GET"])
+def report_pdf(request):
+    """Generate and return a PDF version of the CRM summary report."""
+    from io import BytesIO
+    from xhtml2pdf import pisa
+    from django.template.loader import render_to_string
+    from django.db.models import Sum, Count
+    from datetime import date as date_cls
+
+    start_date = request.GET.get("start_date")
+    end_date = request.GET.get("end_date")
+
+    leads_qs = Lead.objects.filter(company=request.company)
+    deals_qs = Deal.objects.filter(company=request.company)
+    customers_qs = Customer.objects.filter(company=request.company)
+    tasks_qs = Task.objects.filter(company=request.company)
+
+    if start_date and end_date:
+        leads_qs = leads_qs.filter(created_at__date__range=[start_date, end_date])
+        deals_qs = deals_qs.filter(created_at__date__range=[start_date, end_date])
+        customers_qs = customers_qs.filter(created_at__date__range=[start_date, end_date])
+        tasks_qs = tasks_qs.filter(created_at__date__range=[start_date, end_date])
+
+    total_revenue = customers_qs.aggregate(total=Sum("lifetime_value"))["total"] or 0
+    deals_by_stage = list(deals_qs.values("stage").annotate(count=Count("id")))
+    leads_by_source = list(leads_qs.values("lead_source").annotate(count=Count("id")))
+
+    ctx = {
+        "date": date_cls.today().strftime("%d %b %Y"),
+        "start_date": start_date or "All time",
+        "end_date": end_date or "All time",
+        "total_revenue": f"{float(total_revenue):,.2f}",
+        "total_leads": leads_qs.count(),
+        "total_deals": deals_qs.count(),
+        "total_customers": customers_qs.count(),
+        "total_tasks": tasks_qs.count(),
+        "active_customers": customers_qs.filter(status="active").count(),
+        "pending_tasks": tasks_qs.filter(status="pending").count(),
+        "completed_tasks": tasks_qs.filter(status="completed").count(),
+        "high_priority_tasks": tasks_qs.filter(priority="high").count(),
+        "deals_by_stage": deals_by_stage,
+        "leads_by_source": leads_by_source,
+    }
+
+    html_string = render_to_string("report_pdf.html", ctx)
+    buffer = BytesIO()
+    pisa_status = pisa.CreatePDF(html_string, dest=buffer)
+
+    if pisa_status.err:
+        return HttpResponse("Error generating PDF", status=500)
+
+    buffer.seek(0)
+    filename = f"CRM_Report_{date_cls.today().isoformat()}.pdf"
+    response = HttpResponse(buffer, content_type="application/pdf")
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
 
 
 # ......... convert lead to customer through button ...........
@@ -1958,12 +2174,13 @@ def convert_lead(request, lead_id):
 
     if create_deal:
 
-        related_type = request.data.get("related_type")
+        related_type = request.data.get("related_type") or ("customer" if create_customer or customer else "account" if create_account or account else "customer")
 
         deal_kwargs = {
             "company": request.company,
             "lead": lead,
             "deal_name": request.data.get("deal_name", f"{lead.company_name} Deal"),
+            "company_name": lead.company_name or (account_data.get("acc_name") if account_data else "") or (customer_data.get("companyName") if customer_data else "") or "Deal",
             "deal_amount": request.data.get("deal_amount") or 0,
             "stage": request.data.get("stage") or "Proposal",
             "assigned_to_id": request.data.get("assigned_to") or None,
@@ -2121,7 +2338,7 @@ def add_picklist_option(request):
         return HttpResponse("field, value and label are required", status=400)
  
     exists = PicklistOption.objects.filter(
-        Q(company=request.company) | Q(company__isnull=True),
+        company=request.company,
         field=field,
         value=value,
     ).exists()
@@ -2129,15 +2346,28 @@ def add_picklist_option(request):
     if exists:
         return HttpResponse("This option already exists", status=400)
  
-    max_order = PicklistOption.objects.filter(company=request.company, field=field).count()
-    PicklistOption.objects.create(company=request.company, field=field, value=value, label=label, order=max_order)
+    max_order = PicklistOption.objects.filter(
+        Q(company=request.company) | Q(company__isnull=True),
+        field=field
+    ).count()
+
+    PicklistOption.objects.create(
+        company=request.company,
+        field=field,
+        value=value,
+        label=label,
+        order=max_order
+    )
     return HttpResponse("Option added successfully", status=201)
  
  
 @api_view(['PUT'])
 def update_picklist_option(request, id):
     try:
-        option = PicklistOption.objects.get(id=id, company=request.company)
+        option = PicklistOption.objects.get(
+            Q(company=request.company) | Q(company__isnull=True),
+            id=id
+        )
     except PicklistOption.DoesNotExist:
         return HttpResponse("Option not found", status=404)
  
@@ -2150,7 +2380,10 @@ def update_picklist_option(request, id):
 @api_view(['DELETE'])
 def delete_picklist_option(request, id):
     try:
-        option = PicklistOption.objects.get(id=id, company=request.company)
+        option = PicklistOption.objects.get(
+            Q(company=request.company) | Q(company__isnull=True),
+            id=id
+        )
         option.delete()
         return JsonResponse({"message": "Option deleted successfully"})
     except PicklistOption.DoesNotExist:
@@ -3948,12 +4181,12 @@ def add_call(request):
             account_id=related_account_id if related_type == "account" else None,
         )
 
-        if call.assigned_to and call.assigned_to.user:
+        if call.assigned_to:
             related_label = get_related_label(related_type, call.lead, call.contact, call.deal, call.account)
             try:
                 notify_user(
                     company=request.company,
-                    user=call.assigned_to.user,
+                    user=call.assigned_to,
                     notification_type="call_assigned",
                     title="New Call Assigned",
                     message=(
@@ -4081,13 +4314,13 @@ def update_call(request, id):
 
         call.save()
 
-        if call.assigned_to and call.assigned_to_id != previous_staff_id and call.assigned_to.user:
+        if call.assigned_to and call.assigned_to_id != previous_staff_id:
             related_type_resolved = "lead" if call.lead else "contact" if call.contact else "deal" if call.deal else "account" if call.account else "none"
             related_label = get_related_label(related_type_resolved, call.lead, call.contact, call.deal, call.account)
             try:
                 notify_user(
                     company=request.company,
-                    user=call.assigned_to.user,
+                    user=call.assigned_to,
                     notification_type="call_assigned",
                     title="Call Assigned to You",
                     message=(
@@ -6256,12 +6489,12 @@ def _serialize_profile(staff):
         "role": staff.get_role_display() if staff.role else "",
         "roleValue": staff.role,
         "department": staff.department,
-        "profileType": staff.profile_type,
         "mobile": staff.mobile,
         "website": staff.website,
         "fax": staff.fax,
         "alias": staff.alias,
         "dateOfBirth": staff.date_of_birth.isoformat() if staff.date_of_birth else "",
+        "profilePicture": staff.profile_picture.url if staff.profile_picture else "",
         "street": addr.street_address if addr else "",
         "city": addr.city if addr else "",
         "state": addr.state if addr else "",
@@ -6277,6 +6510,7 @@ def get_profile(request):
 
 
 @api_view(["PATCH"])
+@parser_classes([MultiPartParser, FormParser, JSONParser])
 def update_profile(request):
     staff = request.staff
     data = request.data
@@ -6288,7 +6522,6 @@ def update_profile(request):
         ("website", "website"),
         ("fax", "fax"),
         ("alias", "alias"),
-        ("profile_type", "profileType"),
     ]
 
     for model_field, payload_key in editable_fields:
@@ -6298,6 +6531,9 @@ def update_profile(request):
     if "dateOfBirth" in data:
         raw_dob = data.get("dateOfBirth")
         staff.date_of_birth = parse_date(raw_dob) if raw_dob else None
+
+    if "profilePicture" in request.FILES:
+        staff.profile_picture = request.FILES["profilePicture"]
 
     address_fields = {
         "street_address": data.get("street"),
@@ -6347,24 +6583,26 @@ def to_camel(pref):
     return {camel: getattr(pref, field) for camel, field in FIELD_MAP.items()}
 
 
-@api_view(['GET', 'PUT'])
+@api_view(['GET', 'PUT', 'PATCH'])
 def notification_preferences(request):
+    user = getattr(request, "user", None)
+    if not user or not user.is_authenticated:
+        user = getattr(request, "staff", None) and getattr(request.staff, "user", None)
+
+    company = getattr(request, "company", None) or (user and hasattr(user, "staff") and user.staff.company)
+
+    if not user or not company:
+        return JsonResponse({"error": "Unauthorized or missing company"}, status=401)
+
     pref, _ = NotificationPreference.objects.get_or_create(
-        company=request.company, user=request.user
+        company=company, user=user
     )
 
     if request.method == 'GET':
         return JsonResponse(to_camel(pref))
 
-    if request.method == 'PUT':
+    if request.method in ['PUT', 'PATCH']:
         data = request.data
-        unknown_keys = [k for k in data.keys() if k not in FIELD_MAP]
-        if unknown_keys:
-            return JsonResponse(
-                {"error": f"Unknown field(s): {', '.join(unknown_keys)}"},
-                status=400
-            )
-
         for camel, field in FIELD_MAP.items():
             if camel in data:
                 setattr(pref, field, bool(data[camel]))
@@ -6374,10 +6612,19 @@ def notification_preferences(request):
 
 @api_view(["GET"])
 def get_notifications(request):
+    user = getattr(request, "user", None)
+    if not user or not user.is_authenticated:
+        user = getattr(request, "staff", None) and getattr(request.staff, "user", None)
+    
+    company = getattr(request, "company", None) or (user and hasattr(user, "staff") and user.staff.company)
+
+    if not user or not company:
+        return Response([])
+
     notifications = Notification.objects.filter(
-        company=request.company,
-        user=request.user
-    )
+        company=company,
+        user=user,
+    ).order_by("-created_at")
 
     data = [
         {
@@ -6395,21 +6642,36 @@ def get_notifications(request):
 
 @api_view(["GET"])
 def get_unread_count(request):
+    user = getattr(request, "user", None)
+    if not user or not user.is_authenticated:
+        user = getattr(request, "staff", None) and getattr(request.staff, "user", None)
+
+    company = getattr(request, "company", None) or (user and hasattr(user, "staff") and user.staff.company)
+
+    if not user or not company:
+        return Response({"count": 0})
+
     count = Notification.objects.filter(
-        company=request.company,
-        user=request.user,
-        is_read=False
+        company=company,
+        user=user,
+        is_read=False,
     ).count()
 
     return Response({"count": count})
 
 @api_view(["PUT"])
 def mark_notification_read(request, id):
+    user = getattr(request, "user", None)
+    if not user or not user.is_authenticated:
+        user = getattr(request, "staff", None) and getattr(request.staff, "user", None)
+
+    company = getattr(request, "company", None) or (user and hasattr(user, "staff") and user.staff.company)
+
     notification = get_object_or_404(
         Notification,
         id=id,
-        company=request.company,
-        user=request.user,
+        company=company,
+        user=user,
     )
 
     notification.is_read = True
@@ -6419,11 +6681,18 @@ def mark_notification_read(request, id):
 
 @api_view(["PUT"])
 def mark_all_notifications_read(request):
-    Notification.objects.filter(
-        company=request.company,
-        user=request.user,
-        is_read=False,
-    ).update(is_read=True)
+    user = getattr(request, "user", None)
+    if not user or not user.is_authenticated:
+        user = getattr(request, "staff", None) and getattr(request.staff, "user", None)
+
+    company = getattr(request, "company", None) or (user and hasattr(user, "staff") and user.staff.company)
+
+    if user and company:
+        Notification.objects.filter(
+            company=company,
+            user=user,
+            is_read=False,
+        ).update(is_read=True)
 
     return Response({"message": "Success"})
 
@@ -6460,3 +6729,388 @@ def change_password(request):
         return Response({"message": "Password updated successfully"}, status=200)
     except Exception as e:
         return Response({"message": str(e)}, status=500)
+
+
+
+
+# .............. twilio settings ...................
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_twilio_settings(request):
+    company = getattr(request, "company", None) or getattr(getattr(request.user, "staff", None), "company", None)
+    if not company:
+        return Response({"error": "No company associated with user"}, status=400)
+    try:
+        settings_obj = TwilioSettings.objects.get(company=company)
+    except TwilioSettings.DoesNotExist:
+        return Response({"connected": False})
+
+    return Response({
+        "connected": settings_obj.is_active,
+        "account_sid": settings_obj.account_sid,
+        "caller_id": settings_obj.caller_id,
+        # never return the auth token, even encrypted, to the frontend
+        "last_verified_at": settings_obj.last_verified_at,
+    })
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def save_twilio_settings(request):
+    """
+    Body:
+    {
+      "account_sid": "AC...",
+      "auth_token": "...",
+      "caller_id": "+17372508034"
+    }
+    """
+    company = getattr(request, "company", None) or getattr(getattr(request.user, "staff", None), "company", None)
+    if not company:
+        return Response({"error": "No company associated with user"}, status=400)
+
+    account_sid = request.data.get("account_sid", "").strip()
+    auth_token = request.data.get("auth_token", "").strip()
+    caller_id = request.data.get("caller_id", "").strip()
+
+    existing_settings = TwilioSettings.objects.filter(company=company).first()
+    if not auth_token and existing_settings and existing_settings.auth_token_encrypted:
+        try:
+            auth_token = existing_settings.auth_token
+        except Exception:
+            pass
+
+    if not account_sid or not auth_token or not caller_id:
+        return Response({"error": "account_sid, auth_token, and caller_id are all required"}, status=400)
+
+    if Client is None:
+        return Response({"error": "Twilio library is not installed on the server."}, status=500)
+
+    # Validate credentials actually work before saving them as active
+    try:
+        test_client = Client(account_sid, auth_token)
+        test_client.api.accounts(account_sid).fetch()
+    except TwilioRestException as e:
+        return Response({"error": f"Twilio rejected these credentials: {e.msg}"}, status=400)
+    except Exception as e:
+        return Response({"error": f"Couldn't verify credentials: {str(e)}"}, status=400)
+
+    try:
+        settings_obj, _ = TwilioSettings.objects.get_or_create(company=company)
+        settings_obj.account_sid = account_sid
+        settings_obj.auth_token = auth_token  # uses the setter, encrypts automatically
+        settings_obj.caller_id = caller_id
+        settings_obj.is_active = True
+        settings_obj.last_verified_at = timezone.now()
+        settings_obj.save()
+    except Exception as e:
+        logger.exception("Failed to save Twilio settings")
+        return Response({"error": f"Failed to save settings: {str(e)}"}, status=500)
+
+    return Response({"connected": True, "message": "Twilio account connected successfully"})
+
+
+@api_view(["POST", "DELETE"])
+@permission_classes([IsAuthenticated])
+def disconnect_twilio(request):
+    company = getattr(request, "company", None) or getattr(getattr(request.user, "staff", None), "company", None)
+    if not company:
+        return Response({"error": "No company associated with user"}, status=400)
+    TwilioSettings.objects.filter(company=company).delete()
+    return Response({"connected": False, "message": "Twilio account disconnected successfully"})
+
+
+# .............. call through twilio ................
+TRIAL_ACCOUNT_ERROR_CODES = {
+    21219: "This number isn't verified for your Twilio trial account. "
+           "Verify it under Phone Numbers > Manage > Verified Caller IDs, "
+           "then try again.",
+    21211: "That phone number looks invalid. Double-check the format "
+           "(include country code, e.g. +91XXXXXXXXXX).",
+    21610: "This number has opted out of messages/calls from your Twilio number.",
+}
+ 
+ 
+def get_twilio_client_for_company(company):
+    """
+    Returns (client, twilio_settings) for an active, connected company,
+    or (None, None) if the company hasn't connected Twilio yet.
+    """
+    try:
+        twilio_settings = TwilioSettings.objects.get(company=company, is_active=True)
+    except TwilioSettings.DoesNotExist:
+        return None, None
+
+    if Client is None:
+        return None, None
+
+    return Client(twilio_settings.account_sid, twilio_settings.auth_token), twilio_settings
+
+
+def validate_twilio_request(request, auth_token):
+    if getattr(settings, "DEBUG", False):
+        return True
+    try:
+        validator = RequestValidator(auth_token)
+        signature = request.headers.get("X-Twilio-Signature", "")
+        url = request.build_absolute_uri()
+        params = request.POST.dict() if request.method == "POST" else {}
+        return validator.validate(url, params, signature)
+    except Exception as e:
+        logger.warning("Twilio signature validation error: %s", e)
+        return False
+
+
+def normalize_e164_phone(raw_phone, default_country_code="+91"):
+    if not raw_phone:
+        return ""
+    clean = re.sub(r"[^\d+]", "", str(raw_phone).strip())
+    if not clean:
+        return ""
+    if clean.startswith("+"):
+        return clean
+    if clean.startswith("00"):
+        return "+" + clean[2:]
+    if clean.startswith("0") and len(clean) == 11:
+        clean = clean[1:]
+    if len(clean) == 10:
+        cc = default_country_code if default_country_code.startswith("+") else f"+{default_country_code}"
+        return f"{cc}{clean}"
+    if len(clean) == 12 and clean.startswith("91"):
+        return f"+{clean}"
+    return f"+{clean}"
+
+
+# ---------------------------------------------------------------------------
+# 1. Agent clicks "Call" -> this fires
+# ---------------------------------------------------------------------------
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def dial_out(request):
+    """
+    Body:
+    {
+      "to_number": "+91XXXXXXXXXX",
+      "subject": "Follow-up on quote",
+      "lead_id": null,
+      "contact_id": null,
+      "deal_id": null,
+      "account_id": null,
+      "case_id": null
+    }
+    """
+    try:
+        staff = getattr(request.user, "staff", None)
+        if not staff:
+            return Response(
+                {"error": "No staff profile associated with this user account."},
+                status=400,
+            )
+        company = staff.company
+
+        raw_to_number = request.data.get("to_number")
+        if not raw_to_number:
+            return Response({"error": "to_number is required"}, status=400)
+
+        to_number = normalize_e164_phone(raw_to_number)
+        if not to_number:
+            return Response({"error": "Invalid destination phone number provided"}, status=400)
+
+        staff_raw_phone = getattr(staff, "mobile", None) or getattr(staff, "phone_number", None) or getattr(staff, "phone", None)
+        if not staff_raw_phone:
+            return Response(
+                {"error": "No phone number/mobile on file for your staff account. Please add your mobile number in your profile settings."},
+                status=400,
+            )
+
+        staff_phone = normalize_e164_phone(staff_raw_phone)
+        if not staff_phone:
+            return Response(
+                {"error": "Invalid staff mobile number format in profile. Please update your profile with a valid number."},
+                status=400,
+            )
+
+        if Client is None:
+            return Response(
+                {"error": "Twilio library is not installed on the server."},
+                status=500,
+            )
+
+        client, twilio_settings = get_twilio_client_for_company(company)
+        if not client:
+            return Response(
+                {"error": "Twilio isn't connected for your company yet. Go to Calling Settings to connect your Twilio account."},
+                status=400,
+            )
+
+        backend_base = getattr(settings, "BACKEND_BASE_URL", "https://crm-backend-ejfr.onrender.com").rstrip("/")
+
+        try:
+            call = client.calls.create(
+                to=staff_phone,
+                from_=twilio_settings.caller_id,
+                url=(
+                    f"{backend_base}/api/admin/calls/connect-twiml/"
+                    f"?lead_number={to_number}&company_id={company.id}"
+                ),
+                status_callback=f"{backend_base}/api/admin/calls/status-callback/?company_id={company.id}",
+                status_callback_event=["initiated", "ringing", "answered", "completed"],
+                status_callback_method="POST",
+            )
+        except TwilioRestException as e:
+            friendly = TRIAL_ACCOUNT_ERROR_CODES.get(e.code)
+            if friendly:
+                return Response({"error": friendly, "twilio_code": e.code}, status=400)
+            return Response({"error": f"Twilio error: {e.msg}", "twilio_code": e.code}, status=502)
+        except Exception as e:
+            logger.exception("Twilio call creation failed")
+            return Response({"error": f"Failed to place call via Twilio: {str(e)}"}, status=502)
+
+        call_record = Call.objects.create(
+            company=company,
+            case_id=request.data.get("case_id"),
+            subject=request.data.get("subject") or f"Call to {to_number}",
+            call_type="outbound",
+            status="follow up",
+            duration=0,
+            start_time=timezone.now(),
+            assigned_to=staff,
+            lead_id=request.data.get("lead_id"),
+            contact_id=request.data.get("contact_id"),
+            deal_id=request.data.get("deal_id"),
+            account_id=request.data.get("account_id"),
+            call_sid=call.sid,
+            from_number=twilio_settings.caller_id,
+            to_number=to_number,
+            twilio_status="initiated",
+        )
+
+        return Response({"call_sid": call.sid, "call_id": call_record.id, "status": "initiated"})
+    except Exception as e:
+        logger.exception("dial_out unexpected error")
+        return Response({"error": f"Server error: {str(e)}"}, status=500)
+
+
+# ---------------------------------------------------------------------------
+# 2. Twilio calls the agent; once answered, hits this to bridge to the lead
+# ---------------------------------------------------------------------------
+@api_view(["POST", "GET"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def connect_twiml(request):
+    company_id = request.GET.get("company_id") or request.POST.get("company_id")
+
+    response = VoiceResponse()
+
+    if not company_id:
+        response.say("Configuration error. Goodbye.")
+        return HttpResponse(str(response), content_type="text/xml")
+
+    try:
+        twilio_settings = TwilioSettings.objects.get(company_id=company_id, is_active=True)
+    except TwilioSettings.DoesNotExist:
+        response.say("Configuration error. Goodbye.")
+        return HttpResponse(str(response), content_type="text/xml")
+
+    if not validate_twilio_request(request, twilio_settings.auth_token):
+        return HttpResponseForbidden("Invalid Twilio signature")
+
+    raw_lead_number = request.GET.get("lead_number") or request.POST.get("lead_number")
+    lead_number = normalize_e164_phone(raw_lead_number)
+
+    if not lead_number:
+        response.say("No destination number was provided. Goodbye.")
+        return HttpResponse(str(response), content_type="text/xml")
+
+    dial = Dial(caller_id=twilio_settings.caller_id)
+    dial.number(lead_number)
+    response.append(dial)
+
+    return HttpResponse(str(response), content_type="text/xml")
+
+
+# ---------------------------------------------------------------------------
+# 3. Twilio posts status updates here as the call progresses
+# ---------------------------------------------------------------------------
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def call_status_callback(request):
+    company_id = request.GET.get("company_id") or request.POST.get("company_id")
+    if not company_id:
+        return Response({"error": "company_id missing"}, status=400)
+
+    try:
+        twilio_settings = TwilioSettings.objects.get(company_id=company_id, is_active=True)
+    except TwilioSettings.DoesNotExist:
+        return Response({"error": "No active Twilio settings for this company"}, status=404)
+
+    if not validate_twilio_request(request, twilio_settings.auth_token):
+        return HttpResponseForbidden("Invalid Twilio signature")
+
+    call_sid = request.data.get("CallSid")
+    twilio_status = request.data.get("CallStatus")
+    duration_seconds = request.data.get("CallDuration")
+    error_code = request.data.get("ErrorCode")
+
+    if not call_sid:
+        return Response({"error": "CallSid missing"}, status=400)
+
+    try:
+        call_record = Call.objects.get(call_sid=call_sid)
+    except Call.DoesNotExist:
+        return Response({"error": "No matching Call record"}, status=404)
+
+    if twilio_status:
+        call_record.twilio_status = twilio_status
+    if duration_seconds:
+        call_record.twilio_duration_seconds = int(duration_seconds)
+    if error_code:
+        call_record.error_message = TRIAL_ACCOUNT_ERROR_CODES.get(
+            int(error_code), f"Twilio error code {error_code}"
+        )
+
+    call_record.sync_status_from_twilio()
+    call_record.save()
+
+    return Response({"ok": True})
+
+# ---------------------------------------------------------------------------
+# 4. Call history for a lead/contact/deal/account
+# ---------------------------------------------------------------------------
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def call_history(request):
+    """
+    Query params: ?lead_id=  or  ?contact_id=  or  ?deal_id=  or  ?account_id=
+    """
+    company = request.user.staff.company
+    qs = Call.objects.filter(company=company).order_by("-start_time")
+ 
+    for param, field in [
+        ("lead_id", "lead_id"),
+        ("contact_id", "contact_id"),
+        ("deal_id", "deal_id"),
+        ("account_id", "account_id"),
+    ]:
+        value = request.query_params.get(param)
+        if value:
+            qs = qs.filter(**{field: value})
+ 
+    data = [
+        {
+            "id": c.id,
+            "subject": c.subject,
+            "call_sid": c.call_sid,
+            "to_number": c.to_number,
+            "status": c.status,
+            "twilio_status": c.twilio_status,
+            "duration": c.duration,
+            "call_type": c.call_type,
+            "assigned_to": c.assigned_to_id,
+            "start_time": c.start_time.isoformat(),
+        }
+        for c in qs[:100]
+    ]
+    return Response({"results": data})
+ 

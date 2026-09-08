@@ -38,6 +38,7 @@ urlpatterns= [
     path('staff/delete/<int:id>/', views.delete_staff, name='staff-delete'),
 
     path('report/dashboard/', views.report_view, name='report-dashboard'),
+    path('report/pdf/', views.report_pdf, name='report-pdf'),
 
     path('lead/customer/prefill/<int:lead_id>/', views.get_lead_to_customer_prefill, name='lead-to-customer'),
     path('lead/convert/<int:lead_id>/', views.convert_lead, name='lead-convert'),
@@ -160,4 +161,13 @@ urlpatterns= [
     path('integrations/meta/callback/', views.meta_callback, name='meta-callback'),
     path('webhooks/meta/', views.meta_webhook, name='meta-webhook'),
     path('integrations/meta/status/', views.meta_status, name='meta-status'),
+
+    path('calls/dial-out/', views.dial_out, name='call-dial-out'),
+    path('calls/connect-twiml/', views.connect_twiml, name='call-connect-twiml'),
+    path('calls/status-callback/', views.call_status_callback, name='call-status-callback'),
+    path('calls/history/', views.call_history, name='call-history'),
+
+    path('calls/twilio-settings/', views.get_twilio_settings, name='twilio-settings-get'),
+    path('calls/twilio-settings/save/', views.save_twilio_settings, name='twilio-settings-save'),
+    path('calls/twilio-settings/disconnect/', views.disconnect_twilio, name='twilio-settings-disconnect'),
 ]

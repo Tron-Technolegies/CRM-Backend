@@ -21,6 +21,9 @@ class CompanyMiddleware:
             "/admin/",
             "/api/admin/integrations/meta/callback/",
             "/api/admin/webhooks/meta/",
+            # --- Twilio webhooks: hit directly by Twilio's servers, no JWT ---
+            "/api/admin/calls/connect-twiml/",
+            "/api/admin/calls/status-callback/",
         ]
 
         if any(request.path.startswith(path) for path in public_paths):
@@ -36,9 +39,10 @@ class CompanyMiddleware:
             access_token = AccessToken(token)
             user_id = access_token["user_id"]
             user = User.objects.select_related("staff__company").get(id=user_id)
-            staff = user.staff
-            request.company = staff.company
+            staff = getattr(user, "staff", None)
+            request.user = user
             request.staff = staff
+            request.company = staff.company if staff else None
 
         except Exception as e:
             print("MIDDLEWARE ERROR:", e)
