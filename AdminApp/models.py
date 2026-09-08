@@ -1,4 +1,5 @@
 from datetime import timezone
+from email.policy import default
 import uuid
 
 from django.db import models
@@ -529,16 +530,25 @@ class Meeting(models.Model):
     ]
 
     PROVIDER_CHOICES = [
+        ("jitsi","Jitsi"),
         ("zoom", "Zoom"),
         ("google_meet", "Google Meet"),
         ("microsoft_teams", "Microsoft Teams"),
         ("other", "Other"),
     ]
 
+    STATUS_CHOICES = [
+        ("scheduled", "Scheduled"),
+        ("ongoing", "Ongoing"),
+        ("completed", "Completed"),
+        ("cancelled", "Cancelled"),
+    ]
+
     RELATED_TYPE_CHOICES = [
         ("none", "None"),
         ("lead", "Lead"),
         ("customer", "Customer"),
+        ("account", "Account"),
     ]
 
     REPEAT_CHOICES = [
@@ -555,14 +565,18 @@ class Meeting(models.Model):
     title = models.CharField(max_length=255)
     meeting_venue = models.CharField(max_length=50, choices=VENUE_CHOICES, default="online")
 
-    provider = models.CharField(max_length=50, choices=PROVIDER_CHOICES, blank=True, default="")
+    provider = models.CharField(max_length=50, choices=PROVIDER_CHOICES, blank=True, default="jitsi")
 
     location = models.CharField(max_length=255, blank=True, default="")
     all_day = models.BooleanField(default=False)
 
     from_datetime = models.DateTimeField()
     to_datetime = models.DateTimeField()
+    status=models.CharField(max_length=20, choices=STATUS_CHOICES, default="scheduled")
 
+    room_name = models.CharField(max_length=255, blank=True, unique=True,null=True)
+    meeting_code = models.CharField(max_length=100, blank=True, unique=True,null=True)
+    
     host = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="hosted_meetings")
     participants = models.ManyToManyField(Staff, blank=True, related_name="meetings")
 
@@ -573,12 +587,154 @@ class Meeting(models.Model):
 
     repeat = models.CharField(max_length=20, choices=REPEAT_CHOICES, default="none")
 
+    started_at = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+
+    ended_at = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+
+    created_by = models.ForeignKey(
+        Staff,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_meetings"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return self.title
 
+class MeetingParticipant(models.Model):
+    
+    ROLE_CHOICES = [
+        ("host", "Host"),
+        ("co_host", "Co-Host"),
+        ("participant", "Participant"),
+        ("guest", "Guest"),
+    ]
+
+    STATUS_CHOICES = [
+        ("invited", "Invited"),
+        ("accepted", "Accepted"),
+        ("declined", "Declined"),
+        ("joined", "Joined"),
+        ("left", "Left"),
+    ]
+
+    meeting = models.ForeignKey(
+        Meeting,
+        on_delete=models.CASCADE,
+        related_name="meeting_participants"
+    )
+
+    # Internal CRM staff member
+    staff = models.ForeignKey(
+        Staff,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="meeting_participations"
+    )
+
+    # External participant
+    guest_name = models.CharField(
+        max_length=255,
+        blank=True,
+        default=""
+    )
+
+    guest_email = models.EmailField(
+        blank=True,
+        default=""
+    )
+
+    role = models.CharField(
+        max_length=20,
+        choices=ROLE_CHOICES,
+        default="participant"
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default="invited"
+    )
+
+    invited_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    accepted_at = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+
+    joined_at = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+
+    left_at = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+
+    duration_seconds = models.PositiveIntegerField(
+        default=0
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True
+    )
+
+    def __str__(self):
+        if self.staff:
+            return f"{self.staff.full_name} - {self.meeting.title}"
+
+        if self.guest_name:
+            return f"{self.guest_name} - {self.meeting.title}"
+
+        return f"Participant - {self.meeting.title}"
+
+class MeetingAttendeeLog(models.Model):
+    
+    meeting = models.ForeignKey(
+        Meeting,
+        on_delete=models.CASCADE,
+        related_name="attendee_logs"
+    )
+
+    participant = models.ForeignKey(
+        MeetingParticipant,
+        on_delete=models.CASCADE,
+        related_name="attendance_logs"
+    )
+
+    joined_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    left_at = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+
+    duration_seconds = models.PositiveIntegerField(
+        default=0
+    )
+
+    def __str__(self):
+        return f"{self.participant} - {self.meeting.title}"
 
 
 class Call(models.Model):

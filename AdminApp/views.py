@@ -3,6 +3,8 @@ import hmac
 import logging
 import os
 import re
+import secrets
+import string
 import traceback
 from urllib.parse import urlencode
 
@@ -20,7 +22,8 @@ except ImportError:
 logger = logging.getLogger(__name__)
 from django.core import signing
 from django.shortcuts import redirect
-
+from .jaas import generate_jaas_jwt
+from django.utils import timezone
 from django.tasks import task
 from django.utils import json, timezone
 from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
@@ -35,7 +38,7 @@ from django.db.models import Count
 from django.db import transaction
 
 from AdminApp.email_utils import send_invite_email
-from AdminApp.models import Accounts, Address, Call, Case, CaseSolution, Company, Customer, Deal, Invoice, InvoiceItem, Lead, Meeting, PicklistOption, PriceBook, PriceBookItem, Product, PurchaseOrder, PurchaseOrderItem, QuoteProduct, Quotes, SalesOrder, SalesOrderItem, Service, Staff, Task, Vendor
+from AdminApp.models import Accounts, Address, Call, Case, CaseSolution, Company, Customer, Deal, Invoice, InvoiceItem, Lead, Meeting, PicklistOption, PriceBook, PriceBookItem, Product, PurchaseOrder, PurchaseOrderItem, QuoteProduct, Quotes, SalesOrder, SalesOrderItem, Service, Staff, Task, Vendor,MeetingParticipant,MeetingAttendeeLog
 
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
@@ -56,8 +59,15 @@ from django.utils.dateparse import parse_date
 
 from AdminApp.services import create_lead_for_company, get_related_label, notify_user
 
-from .models import MetaIntegration, Notification, NotificationPreference, TwilioSettings
-from AdminApp.permissions import require_permission
+from .models import (
+    MetaIntegration,
+    Meeting,
+    MeetingParticipant,
+    MeetingAttendeeLog,
+    Notification,
+    NotificationPreference,
+    TwilioSettings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -3079,13 +3089,19 @@ def delete_quote(request, id):
         )
     
 
+def generate_meeting_room():
+    code = secrets.token_hex(4).upper()
+
+    room_name = f"crm-meeting-{code}"
+
+    return room_name, code
 # .................. meeting ...............
 @api_view(['POST'])
 @require_permission('meeting.create')
 def add_meeting(request):
     title = request.data.get("title")
     meeting_venue = request.data.get("meeting_venue", "online")
-    provider = request.data.get("provider", "")
+    provider = request.data.get("provider","jitsi")
     location = request.data.get("location", "")
     all_day = request.data.get("all_day", False)
     from_datetime = request.data.get("from_datetime")
@@ -3101,26 +3117,154 @@ def add_meeting(request):
     if not title or not from_datetime or not to_datetime:
         return HttpResponse("Title, from_datetime and to_datetime are required", status=400)
 
-    try:
-        meeting = Meeting.objects.create(
-            company=request.company,
-            title=title,
-            meeting_venue=meeting_venue,
-            provider=provider if meeting_venue == "online" else "",
-            location=location if meeting_venue != "online" else "",
-            all_day=all_day if meeting_venue != "online" else False,
-            from_datetime=from_datetime,
-            to_datetime=to_datetime,
-            host_id=host_id or None,
-            related_type=related_type,
-            related_lead_id=related_lead_id if related_type == "lead" else None,
-            related_customer_id=related_customer_id if related_type == "customer" else None,
-            related_account_id=related_account_id if related_type == "account" else None,
-            repeat=repeat,
+    # Normalize participant IDs
+
+    if participant_ids is None:
+        participant_ids = []
+
+    if not isinstance(participant_ids, list):
+        return HttpResponse(
+            "participants must be a list",
+            status=400
         )
 
-        if participant_ids:
-            meeting.participants.set(participant_ids)
+    # Remove duplicates
+    participant_ids = list(dict.fromkeys(participant_ids))
+
+
+    try:
+        # Validate Host
+        host = None
+
+        if host_id:
+            try:
+                host = Staff.objects.get(
+                    id=host_id,
+                    company=request.company
+                )
+            except Staff.DoesNotExist:
+                return HttpResponse(
+                    "Invalid host for this company",
+                    status=400
+                )
+        # Validate Participants
+        participants = Staff.objects.filter(
+            id__in=participant_ids,
+            company=request.company
+        )
+        if participants.count() != len(participant_ids):
+            return HttpResponse(
+                "One or more participants are invalid or do not belong to this company",
+                status=400
+            )
+
+        # Validate Related CRM Object
+
+        related_lead = None
+        related_customer = None
+        related_account = None
+
+        if related_type == "lead":
+            if related_lead_id:
+                related_lead = Lead.objects.filter(
+                    id=related_lead_id,
+                    company=request.company
+                ).first()
+
+                if not related_lead:
+                    return HttpResponse(
+                        "Invalid lead for this company",
+                        status=400
+                    )
+        elif related_type == "customer":
+    
+            if related_customer_id:
+                related_customer = Customer.objects.filter(
+                    id=related_customer_id,
+                    company=request.company
+                ).first()
+
+                if not related_customer:
+                    return HttpResponse(
+                        "Invalid customer for this company",
+                        status=400
+                    )
+
+        elif related_type == "account":
+
+            if related_account_id:
+                related_account = Accounts.objects.filter(
+                    id=related_account_id,
+                    company=request.company
+                ).first()
+
+                if not related_account:
+                    return HttpResponse(
+                        "Invalid account for this company",
+                        status=400
+                    )
+
+        elif related_type != "none":
+
+            return HttpResponse(
+                "Invalid related_type",
+                status=400
+            )
+
+        room_name = None
+        meeting_code = None
+
+        if meeting_venue == "online" and provider == "jitsi":
+            room_name, meeting_code = generate_meeting_room()
+        with transaction.atomic():
+
+            meeting = Meeting.objects.create(
+                company=request.company,
+                title=title,
+                meeting_venue=meeting_venue,
+                provider=provider if meeting_venue == "online" else "",
+                location=location if meeting_venue != "online" else "",
+                all_day=all_day if meeting_venue != "online" else False,
+                from_datetime=from_datetime,
+                to_datetime=to_datetime,
+                host=host,
+
+                room_name=room_name,
+                meeting_code=meeting_code,
+
+                related_type=related_type,
+                related_lead_id=related_lead_id if related_type == "lead" else None,
+                related_customer_id=related_customer_id if related_type == "customer" else None,
+                related_account_id=related_account_id if related_type == "account" else None,
+                repeat=repeat,
+                created_by=getattr(request, "staff", None)
+            )
+
+            meeting.participants.set(participants)
+
+            # Add host
+            if host:
+
+                MeetingParticipant.objects.create(
+                    meeting=meeting,
+                    staff=host,
+                    role="host",
+                    status="invited",
+                )
+
+            # Add normal participants
+            for participant in participants:
+
+                # Do not create duplicate host participant
+                if host and participant.id == host.id:
+                    continue
+
+                MeetingParticipant.objects.create(
+                    meeting=meeting,
+                    staff=participant,
+                    role="participant",
+                    status="invited",
+                )
 
         if meeting.host and meeting.host.user:
             try:
@@ -3154,7 +3298,7 @@ def add_meeting(request):
 def view_meetings(request):
     meetings = (
         Meeting.objects.filter(company=request.company)
-        .select_related("host", "related_lead", "related_customer", "related_account")
+        .select_related("host", "related_lead", "related_customer", "related_account","created_by")
         .prefetch_related("participants")
         .order_by("-created_at")
     )
@@ -3170,6 +3314,12 @@ def view_meetings(request):
             "allDay": m.all_day,
             "fromDatetime": m.from_datetime.isoformat(),
             "toDatetime": m.to_datetime.isoformat(),
+            "status": m.status,
+            "roomName": m.room_name,
+            "meetingCode": m.meeting_code,
+            "startedAt": m.started_at.isoformat() if m.started_at else None,
+            "endedAt": m.ended_at.isoformat() if m.ended_at else None,
+            "createdById": m.created_by.id if m.created_by else None,
             "host": m.host.full_name if m.host else "—",
             "hostId": m.host.id if m.host else None,
             "participants": [{"id": p.id, "fullName": p.full_name} for p in m.participants.all()],
@@ -3187,11 +3337,17 @@ def view_meetings(request):
 @api_view(['GET'])
 @require_permission('meeting.view')
 def view_single_meeting(request, id):
+
     meeting = get_object_or_404(
         Meeting.objects.select_related(
-            "host", "related_lead", "related_customer", "related_account"
-        ).prefetch_related("participants"),
-        id=id, company=request.company
+            "host",
+            "related_lead",
+            "related_customer",
+            "related_account",
+            "created_by"
+        ).prefetch_related("participants", "meeting_participants__staff"),
+        id=id,
+        company=request.company
     )
 
     data = {
@@ -3203,87 +3359,553 @@ def view_single_meeting(request, id):
         "allDay": meeting.all_day,
         "fromDatetime": meeting.from_datetime.isoformat(),
         "toDatetime": meeting.to_datetime.isoformat(),
+
+        "status": meeting.status,
+
+        "roomName": meeting.room_name,
+        "meetingCode": meeting.meeting_code,
+
+
         "host": meeting.host.full_name if meeting.host else "—",
         "hostId": meeting.host.id if meeting.host else None,
-        "participants": [{"id": p.id, "fullName": p.full_name} for p in meeting.participants.all()],
+
+        "participants": [
+            {
+                "id": p.id,
+                "fullName": p.full_name
+            }
+            for p in meeting.participants.all()
+        ],
+
+        "attendance": [
+            {
+                "participantId": p.staff.id if p.staff else None,
+                "name": (
+                    p.staff.full_name
+                    if p.staff
+                    else p.guest_name
+                ),
+                "email": (
+                    p.staff.email
+                    if p.staff
+                    else p.guest_email
+                ),
+                "role": p.role,
+                "status": p.status,
+                "joinedAt": (
+                    p.joined_at.isoformat()
+                    if p.joined_at
+                    else None
+                ),
+                "leftAt": (
+                    p.left_at.isoformat()
+                    if p.left_at
+                    else None
+                ),
+                "durationSeconds": p.duration_seconds,
+            }
+            for p in meeting.meeting_participants.all()
+        ],
+
         "relatedType": meeting.related_type,
-        "relatedLead": {"id": meeting.related_lead.id, "name": meeting.related_lead.full_name} if meeting.related_lead else None,
-        "relatedCustomer": {"id": meeting.related_customer.id, "name": meeting.related_customer.company_name} if meeting.related_customer else None,
-        "relatedAccount": {"id": meeting.related_account.id, "name": meeting.related_account.account_name} if meeting.related_account else None,
+
+        "relatedLead":
+            {
+                "id": meeting.related_lead.id,
+                "name": meeting.related_lead.full_name
+            }
+            if meeting.related_lead else None,
+
+        "relatedCustomer":
+            {
+                "id": meeting.related_customer.id,
+                "name": meeting.related_customer.company_name
+            }
+            if meeting.related_customer else None,
+
+        "relatedAccount":
+            {
+                "id": meeting.related_account.id,
+                "name": meeting.related_account.account_name
+            }
+            if meeting.related_account else None,
+
         "repeat": meeting.repeat,
+
+        "startedAt":
+            meeting.started_at.isoformat()
+            if meeting.started_at else None,
+
+        "endedAt":
+            meeting.ended_at.isoformat()
+            if meeting.ended_at else None,
+
         "createdAt": meeting.created_at.isoformat(),
+        "updatedAt": meeting.updated_at.isoformat(),
     }
 
-    return JsonResponse(data, safe=False)
+    return JsonResponse(data)
 
+
+@api_view(["GET"])
+def join_meeting(request, id):
+    try:
+        meeting = (
+            Meeting.objects
+            .select_related("company", "host")
+            .get(
+                id=id,
+                company=request.company
+            )
+        )
+
+    except Meeting.DoesNotExist:
+        return Response(
+            {"message": "Meeting not found"},
+            status=404
+        )
+
+    # ---------------------------------------------------------
+    # Check Online Meeting
+    # ---------------------------------------------------------
+
+    if meeting.meeting_venue != "online":
+        return Response(
+            {"message": "This is not an online meeting"},
+            status=400
+        )
+
+    # ---------------------------------------------------------
+    # Check Provider
+    # ---------------------------------------------------------
+
+    if meeting.provider != "jitsi":
+        return Response(
+            {"message": "This meeting is not using Jitsi"},
+            status=400
+        )
+
+    # ---------------------------------------------------------
+    # Find Logged-in Staff
+    # ---------------------------------------------------------
+
+    try:
+        staff = Staff.objects.get(
+            user=request.user,
+            company=request.company
+        )
+
+    except Staff.DoesNotExist:
+        return Response(
+            {"message": "Staff profile not found"},
+            status=404
+        )
+
+    # ---------------------------------------------------------
+    # Check Host / Participant
+    # ---------------------------------------------------------
+
+    if meeting.host_id == staff.id:
+
+        role = "host"
+        moderator = True
+
+    else:
+
+        participant = MeetingParticipant.objects.filter(
+            meeting=meeting,
+            staff=staff
+        ).first()
+
+        if not participant:
+            return Response(
+                {"message": "You are not invited to this meeting"},
+                status=403
+            )
+
+        if participant.role == "host":
+
+            role = "host"
+            moderator = True
+
+        else:
+
+            role = participant.role
+            moderator = False
+
+    # ---------------------------------------------------------
+    # Generate JaaS JWT
+    # ---------------------------------------------------------
+
+    try:
+
+        jwt_token = generate_jaas_jwt(
+            staff=staff,
+            room_name=meeting.room_name,
+            moderator=moderator
+        )
+
+    except Exception as e:
+
+        print("JAAS JWT ERROR:", str(e))
+
+        return Response(
+            {
+                "message": "Unable to create meeting authentication token"
+            },
+            status=500
+        )
+
+    # ---------------------------------------------------------
+    # Return Meeting + JaaS Information
+    # ---------------------------------------------------------
+
+    app_id = os.getenv("JAAS_APP_ID")
+
+    return Response(
+        {
+            "message": "Meeting join authorized",
+
+            "meetingId": meeting.id,
+            "title": meeting.title,
+
+            "provider": meeting.provider,
+
+            "roomName": meeting.room_name,
+            "meetingCode": meeting.meeting_code,
+
+            "role": role,
+            "moderator": moderator,
+
+            "status": meeting.status,
+
+            # JaaS
+            "jaasDomain": "8x8.vc",
+            "jaasAppId": app_id,
+
+            "jaasRoomName": (
+                f"{app_id}/{meeting.room_name}"
+            ),
+
+            "jwt": jwt_token,
+        },
+        status=200
+    )
 
 @api_view(['PUT'])
 @require_permission('meeting.edit')
 def update_meeting(request, id):
+
     try:
-        meeting = Meeting.objects.get(id=id, company=request.company)
+        meeting = Meeting.objects.get(
+            id=id,
+            company=request.company
+        )
+
     except Meeting.DoesNotExist:
-        return HttpResponse("Meeting not found", status=404)
+        return HttpResponse(
+            "Meeting not found",
+            status=404
+        )
 
     previous_host_id = meeting.host_id
 
     try:
-        meeting.title = request.data.get("title") or meeting.title
-        meeting.meeting_venue = request.data.get("meeting_venue") or meeting.meeting_venue
-        meeting.repeat = request.data.get("repeat") or meeting.repeat
+
+        # -----------------------------------------------------
+        # Basic fields
+        # -----------------------------------------------------
+
+        if "title" in request.data:
+            meeting.title = request.data.get("title") or meeting.title
+
+        if "meeting_venue" in request.data:
+            meeting.meeting_venue = (
+                request.data.get("meeting_venue")
+                or meeting.meeting_venue
+            )
+
+        if "repeat" in request.data:
+            meeting.repeat = (
+                request.data.get("repeat")
+                or meeting.repeat
+            )
 
         venue = meeting.meeting_venue
+
+        # -----------------------------------------------------
+        # Venue-specific fields
+        # -----------------------------------------------------
+
         if venue == "online":
-            meeting.provider = request.data.get("provider") or meeting.provider
+            
+            if "provider" in request.data:
+                meeting.provider = (
+                    request.data.get("provider")
+                    or "jitsi"
+                )
+
             meeting.location = ""
             meeting.all_day = False
+
+            # Generate JaaS room if missing
+            if meeting.provider == "jitsi" and not meeting.room_name:
+                meeting.room_name, meeting.meeting_code = generate_meeting_room()
+
         else:
-            meeting.location = request.data.get("location") or meeting.location
-            meeting.all_day = request.data.get("all_day", meeting.all_day)
+
+            if "location" in request.data:
+                meeting.location = (
+                    request.data.get("location")
+                    or meeting.location
+                )
+
+            if "all_day" in request.data:
+                meeting.all_day = request.data.get(
+                    "all_day"
+                )
+
             meeting.provider = ""
 
-        from_datetime = request.data.get("from_datetime")
-        if from_datetime:
-            meeting.from_datetime = from_datetime
+        # -----------------------------------------------------
+        # Date/time
+        # -----------------------------------------------------
 
-        to_datetime = request.data.get("to_datetime")
-        if to_datetime:
-            meeting.to_datetime = to_datetime
+        if "from_datetime" in request.data:
+            if request.data.get("from_datetime"):
+                meeting.from_datetime = request.data.get(
+                    "from_datetime"
+                )
 
-        host_id = request.data.get("host")
-        if host_id:
-            meeting.host_id = host_id
-        else:
-            meeting.host = None
+        if "to_datetime" in request.data:
+            if request.data.get("to_datetime"):
+                meeting.to_datetime = request.data.get(
+                    "to_datetime"
+                )
 
-        related_type = request.data.get("related_type")
-        if related_type:
-            meeting.related_type = related_type
-            if related_type == "lead":
-                meeting.related_lead_id = request.data.get("related_lead") or None
-                meeting.related_customer = None
-                meeting.related_account = None
-            elif related_type == "customer":
-                meeting.related_customer_id = request.data.get("related_customer") or None
-                meeting.related_lead = None
-                meeting.related_account = None
-            elif related_type == "account":
-                meeting.related_account_id = request.data.get("related_account") or None
-                meeting.related_lead = None
-                meeting.related_customer = None
+        # -----------------------------------------------------
+        # Host
+        # -----------------------------------------------------
+
+        if "host" in request.data:
+
+            host_id = request.data.get("host")
+
+            if host_id:
+
+                host = Staff.objects.filter(
+                    id=host_id,
+                    company=request.company
+                ).first()
+
+                if not host:
+                    return HttpResponse(
+                        "Invalid host for this company",
+                        status=400
+                    )
+
+                meeting.host = host
+
             else:
-                meeting.related_lead = None
-                meeting.related_customer = None
-                meeting.related_account = None
+                meeting.host = None
+
+        # -----------------------------------------------------
+        # Related CRM object
+        # -----------------------------------------------------
+
+        if "related_type" in request.data:
+
+            related_type = request.data.get(
+                "related_type"
+            )
+
+            if related_type not in [
+                "none",
+                "lead",
+                "customer",
+                "account",
+            ]:
+                return HttpResponse(
+                    "Invalid related_type",
+                    status=400
+                )
+
+            meeting.related_type = related_type
+
+            # Clear all relations first
+            meeting.related_lead = None
+            meeting.related_customer = None
+            meeting.related_account = None
+
+            if related_type == "lead":
+
+                related_lead_id = request.data.get(
+                    "related_lead"
+                )
+
+                if related_lead_id:
+
+                    lead = Lead.objects.filter(
+                        id=related_lead_id,
+                        company=request.company
+                    ).first()
+
+                    if not lead:
+                        return HttpResponse(
+                            "Invalid lead for this company",
+                            status=400
+                        )
+
+                    meeting.related_lead = lead
+
+            elif related_type == "customer":
+
+                related_customer_id = request.data.get(
+                    "related_customer"
+                )
+
+                if related_customer_id:
+
+                    customer = Customer.objects.filter(
+                        id=related_customer_id,
+                        company=request.company
+                    ).first()
+
+                    if not customer:
+                        return HttpResponse(
+                            "Invalid customer for this company",
+                            status=400
+                        )
+
+                    meeting.related_customer = customer
+
+            elif related_type == "account":
+
+                related_account_id = request.data.get(
+                    "related_account"
+                )
+
+                if related_account_id:
+
+                    account = Accounts.objects.filter(
+                        id=related_account_id,
+                        company=request.company
+                    ).first()
+
+                    if not account:
+                        return HttpResponse(
+                            "Invalid account for this company",
+                            status=400
+                        )
+
+                    meeting.related_account = account
+
+        # -----------------------------------------------------
+        # Save Meeting
+        # -----------------------------------------------------
 
         meeting.save()
 
-        participant_ids = request.data.get("participants")
-        if participant_ids is not None:
-            meeting.participants.set(participant_ids)
+        # -----------------------------------------------------
+        # Participants
+        # -----------------------------------------------------
 
-        if meeting.host and meeting.host_id != previous_host_id and meeting.host.user:
+        if "participants" in request.data:
+
+            participant_ids = request.data.get(
+                "participants"
+            ) or []
+
+            if not isinstance(participant_ids, list):
+                return HttpResponse(
+                    "participants must be a list",
+                    status=400
+                )
+
+            participant_ids = list(
+                set(participant_ids)
+            )
+
+            participants = Staff.objects.filter(
+                id__in=participant_ids,
+                company=request.company
+            )
+
+            if participants.count() != len(participant_ids):
+                return HttpResponse(
+                    "One or more participants are invalid or do not belong to this company",
+                    status=400
+                )
+
+            # Keep old M2M synchronized
+            meeting.participants.set(
+                participants
+            )
+
+            # Remove participant records that
+            # are no longer invited.
+            MeetingParticipant.objects.filter(
+                meeting=meeting,
+                staff__isnull=False
+            ).exclude(
+                staff_id__in=participant_ids
+            ).exclude(
+                role="host"
+            ).delete()
+
+            # Add/update participant records
+            for participant in participants:
+
+                if meeting.host_id == participant.id:
+                    continue
+
+                MeetingParticipant.objects.update_or_create(
+                    meeting=meeting,
+                    staff=participant,
+                    defaults={
+                        "role": "participant",
+                    }
+                )
+
+        # -----------------------------------------------------
+        # Synchronize Host Participant
+        # -----------------------------------------------------
+
+        if previous_host_id != meeting.host_id:
+
+            # Remove previous host role
+            if previous_host_id:
+
+                MeetingParticipant.objects.filter(
+                    meeting=meeting,
+                    staff_id=previous_host_id
+                ).update(
+                    role="participant"
+                )
+
+            # Add new host
+            if meeting.host:
+
+                MeetingParticipant.objects.update_or_create(
+                    meeting=meeting,
+                    staff=meeting.host,
+                    defaults={
+                        "role": "host",
+                    }
+                )
+
+        # -----------------------------------------------------
+        # Notify new host
+        # -----------------------------------------------------
+
+        if (
+            meeting.host
+            and meeting.host_id != previous_host_id
+            and meeting.host.user
+        ):
+
             try:
+
                 notify_user(
                     company=request.company,
                     user=meeting.host.user,
@@ -3298,14 +3920,28 @@ def update_meeting(request, id):
                         f"Please log in to the CRM to view the meeting details."
                     ),
                 )
-            except Exception:
-                logger.exception("Failed to notify host for updated meeting %s", meeting.id)
 
-        return HttpResponse("Meeting updated successfully", status=200)
+            except Exception:
+                logger.exception(
+                    "Failed to notify host for updated meeting %s",
+                    meeting.id
+                )
+
+        return HttpResponse(
+            "Meeting updated successfully",
+            status=200
+        )
 
     except Exception as e:
-        print("UPDATE MEETING ERROR:", str(e))
-        return HttpResponse(str(e), status=500)
+
+        logger.exception(
+            "UPDATE MEETING ERROR"
+        )
+
+        return HttpResponse(
+            str(e),
+            status=500
+        )
 
 
 @api_view(['DELETE'])
@@ -3318,6 +3954,250 @@ def delete_meeting(request, id):
     except Meeting.DoesNotExist:
         return HttpResponse("Meeting not found", status=404)
     
+
+@api_view(["POST"])
+def meeting_attendance_join(request, id):
+    """
+    Record that the authenticated CRM staff member joined a meeting.
+    """
+
+    try:
+        meeting = Meeting.objects.get(
+            id=id,
+            company=request.company
+        )
+    except Meeting.DoesNotExist:
+        return Response(
+            {"message": "Meeting not found"},
+            status=404
+        )
+
+    if meeting.meeting_venue != "online":
+        return Response(
+            {"message": "This is not an online meeting"},
+            status=400
+        )
+
+    try:
+        staff = Staff.objects.get(
+            user=request.user,
+            company=request.company
+        )
+    except Staff.DoesNotExist:
+        return Response(
+            {"message": "Staff profile not found"},
+            status=404
+        )
+
+    # Find the CRM meeting participant.
+    participant = MeetingParticipant.objects.filter(
+        meeting=meeting,
+        staff=staff
+    ).first()
+
+    # Host should also have a MeetingParticipant record.
+    if not participant and meeting.host_id == staff.id:
+        participant = MeetingParticipant.objects.create(
+            meeting=meeting,
+            staff=staff,
+            role="host",
+            status="invited"
+        )
+
+    if not participant:
+        return Response(
+            {"message": "You are not invited to this meeting"},
+            status=403
+        )
+
+    now = timezone.now()
+
+    # Check whether this user already has an active attendance log.
+    active_log = MeetingAttendeeLog.objects.filter(
+        meeting=meeting,
+        participant=participant,
+        left_at__isnull=True
+    ).order_by("-joined_at").first()
+
+    if active_log:
+        return Response(
+            {
+                "message": "Attendance already recorded",
+                "meetingId": meeting.id,
+                "participantId": participant.id,
+                "attendanceLogId": active_log.id,
+                "joinedAt": active_log.joined_at,
+            },
+            status=200
+        )
+
+    # Update participant status.
+    participant.status = "joined"
+    participant.joined_at = now
+    participant.left_at = None
+    participant.save(
+        update_fields=[
+            "status",
+            "joined_at",
+            "left_at",
+            "updated_at",
+        ]
+    )
+
+    # Create a new attendance session.
+    attendance_log = MeetingAttendeeLog.objects.create(
+        meeting=meeting,
+        participant=participant,
+        joined_at=now
+    )
+
+    # Start the meeting when the first person joins.
+    if meeting.status == "scheduled":
+        meeting.status = "ongoing"
+        meeting.started_at = now
+        meeting.save(
+            update_fields=[
+                "status",
+                "started_at",
+                "updated_at",
+            ]
+        )
+
+    return Response(
+        {
+            "message": "Meeting attendance started",
+            "meetingId": meeting.id,
+            "participantId": participant.id,
+            "attendanceLogId": attendance_log.id,
+            "joinedAt": attendance_log.joined_at,
+            "status": meeting.status,
+        },
+        status=200
+    )
+
+
+@api_view(["POST"])
+def meeting_attendance_leave(request, id):
+    """
+    Record that the authenticated CRM staff member left a meeting.
+    """
+
+    try:
+        meeting = Meeting.objects.get(
+            id=id,
+            company=request.company
+        )
+    except Meeting.DoesNotExist:
+        return Response(
+            {"message": "Meeting not found"},
+            status=404
+        )
+
+    try:
+        staff = Staff.objects.get(
+            user=request.user,
+            company=request.company
+        )
+    except Staff.DoesNotExist:
+        return Response(
+            {"message": "Staff profile not found"},
+            status=404
+        )
+
+    participant = MeetingParticipant.objects.filter(
+        meeting=meeting,
+        staff=staff
+    ).first()
+
+    if not participant and meeting.host_id == staff.id:
+        participant = MeetingParticipant.objects.filter(
+            meeting=meeting,
+            staff=staff,
+            role="host"
+        ).first()
+
+    if not participant:
+        return Response(
+            {"message": "You are not a participant in this meeting"},
+            status=403
+        )
+
+    # Find the current active attendance session.
+    attendance_log = MeetingAttendeeLog.objects.filter(
+        meeting=meeting,
+        participant=participant,
+        left_at__isnull=True
+    ).order_by("-joined_at").first()
+
+    if not attendance_log:
+        return Response(
+            {
+                "message": "No active attendance session found",
+                "meetingId": meeting.id,
+            },
+            status=200
+        )
+
+    now = timezone.now()
+
+    duration = int(
+        (now - attendance_log.joined_at).total_seconds()
+    )
+
+    if duration < 0:
+        duration = 0
+
+    attendance_log.left_at = now
+    attendance_log.duration_seconds = duration
+    attendance_log.save(
+        update_fields=[
+            "left_at",
+            "duration_seconds",
+        ]
+    )
+
+    # Update participant's current/latest attendance.
+    participant.status = "left"
+    participant.left_at = now
+    participant.duration_seconds += duration
+    participant.save(
+        update_fields=[
+            "status",
+            "left_at",
+            "duration_seconds",
+            "updated_at",
+        ]
+    )
+
+    # Check whether anybody is still inside the meeting.
+    active_participants = MeetingAttendeeLog.objects.filter(
+        meeting=meeting,
+        left_at__isnull=True
+    ).exists()
+
+    # If nobody remains, complete the meeting.
+    if not active_participants and meeting.status == "ongoing":
+        meeting.status = "completed"
+        meeting.ended_at = now
+        meeting.save(
+            update_fields=[
+                "status",
+                "ended_at",
+                "updated_at",
+            ]
+        )
+
+    return Response(
+        {
+            "message": "Meeting attendance ended",
+            "meetingId": meeting.id,
+            "participantId": participant.id,
+            "leftAt": attendance_log.left_at,
+            "durationSeconds": duration,
+            "meetingStatus": meeting.status,
+        },
+        status=200
+    )
 
 
 # ................ calls ....................

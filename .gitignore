@@ -23,4 +23,5 @@ media/
 
 # Environment variables
 .env
+jaas-private-key.pem
 check_number.py

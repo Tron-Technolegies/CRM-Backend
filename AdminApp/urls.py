@@ -67,8 +67,11 @@ urlpatterns= [
     path('meeting/add/', views.add_meeting, name='meeting-add'),
     path('meeting/view/', views.view_meetings, name='meeting-view'),
     path('meeting/single/view/<int:id>/', views.view_single_meeting, name='meeting-single'),
+    path('meeting/join/<int:id>/', views.join_meeting, name='meeting-join'),
     path('meeting/update/<int:id>/', views.update_meeting, name='meeting-update'),
     path('meeting/delete/<int:id>/', views.delete_meeting, name='meeting-delete'),
+    path('meeting/attendance/join/<int:id>/',views.meeting_attendance_join,name='meeting-attendance-join'),
+    path('meeting/attendance/leave/<int:id>/',views.meeting_attendance_leave,name='meeting-attendance-leave'),
 
     path('call/add/', views.add_call, name='call-add'),
     path('call/view/', views.view_calls, name='call-view'),
