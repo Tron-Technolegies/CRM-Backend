@@ -57,6 +57,7 @@ from django.utils.dateparse import parse_date
 from AdminApp.services import create_lead_for_company, get_related_label, notify_user
 
 from .models import MetaIntegration, Notification, NotificationPreference, TwilioSettings
+from AdminApp.permissions import require_permission
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +334,7 @@ def accept_invitation(request):
 
 # ..............lead.......................
 @api_view(["GET"])
+@require_permission('integration.manage')
 def meta_connect(request):
     state = signing.dumps(
         {
@@ -356,6 +358,7 @@ def meta_connect(request):
 
 
 @api_view(["POST"])
+@require_permission('integration.manage')
 def meta_disconnect(request):
     integration = MetaIntegration.objects.filter(
         company=request.company,
@@ -536,6 +539,7 @@ def meta_callback(request):
     
 
 @api_view(["GET"])
+@require_permission('integration.view')
 def meta_status(request):
     integration = MetaIntegration.objects.filter(
         company=request.company,
@@ -614,6 +618,7 @@ def meta_webhook(request):
 
 
 @api_view(["POST"])
+@require_permission('lead.create')
 def add_lead(request):
     full_name = request.data.get("full_name")
     phone_number = request.data.get("phone_number")
@@ -668,6 +673,7 @@ def add_lead(request):
 
 
 @api_view(['GET'])
+@require_permission('lead.view')
 def view_leads(request):
     leads = Lead.objects.filter(company=request.company).order_by('-updated_at')
     list = []
@@ -696,6 +702,7 @@ def view_leads(request):
 
 
 @api_view(['GET'])
+@require_permission('lead.view')
 def view_single_lead(request, id):
     lead = get_object_or_404(Lead, id=id, company=request.company)
     
@@ -720,6 +727,7 @@ def view_single_lead(request, id):
 
 
 @api_view(['PUT'])
+@require_permission('lead.edit')
 def update_lead(request, id):
     print("UPDATE DATA:", request.data)
     try:
@@ -778,6 +786,7 @@ def update_lead(request, id):
 
 
 @api_view(['DELETE'])
+@require_permission('lead.delete')
 def delete_lead(request, id):
     data = Lead.objects.get(id=id, company=request.company)
     data.delete()
@@ -853,6 +862,7 @@ def _resolve_related(request, related_type, related_id):
 
 
 @api_view(["POST"])
+@require_permission('deal.create')
 def add_deal(request):
     deal_name = request.data.get("deal_name")
     company_name = request.data.get("company_name")
@@ -967,6 +977,7 @@ def add_deal(request):
 
 
 @api_view(["GET"])
+@require_permission('deal.view')
 def view_deals(request):
     deals = (
         Deal.objects
@@ -982,6 +993,7 @@ def view_deals(request):
 
 
 @api_view(["GET"])
+@require_permission('deal.view')
 def view_single_deals(request, id):
     deal = get_object_or_404(
         Deal.objects.select_related(
@@ -1000,6 +1012,7 @@ def view_single_deals(request, id):
 
 
 @api_view(["PUT"])
+@require_permission('deal.edit')
 def update_deal(request, id):
     try:
         deal = Deal.objects.get(
@@ -1112,6 +1125,7 @@ def update_deal(request, id):
 
 
 @api_view(["DELETE"])
+@require_permission('deal.delete')
 def delete_deal(request, id):
     deal = get_object_or_404(
         Deal,
@@ -1128,6 +1142,7 @@ def delete_deal(request, id):
 
 # ...................customer...................
 @api_view(['POST'])
+@require_permission('customer.create')
 def add_customer(request):
     print("CUSTOMER PAYLOAD:", request.data)
     company_name = request.data.get("company_name")
@@ -1194,6 +1209,7 @@ def add_customer(request):
 
 
 @api_view(['GET'])
+@require_permission('customer.view')
 def view_customers(request):
     customers = Customer.objects.filter(company=request.company)
     data = []
@@ -1218,6 +1234,7 @@ def view_customers(request):
 
 
 @api_view(['GET'])
+@require_permission('customer.view')
 def view_single_customer(request, id):
     customer = get_object_or_404(Customer, id=id, company=request.company)
 
@@ -1238,6 +1255,7 @@ def view_single_customer(request, id):
 
 
 @api_view(['PUT'])
+@require_permission('customer.edit')
 def update_customer(request, id):
     try:
         customer = Customer.objects.get(id=id, company=request.company)
@@ -1261,6 +1279,7 @@ def update_customer(request, id):
 
 
 @api_view(['DELETE'])
+@require_permission('customer.delete')
 def delete_customer(request, id):
     customer = Customer.objects.get(id=id, company=request.company)
     customer.delete()
@@ -1270,6 +1289,7 @@ def delete_customer(request, id):
 
 # .................task..................
 @api_view(['POST'])
+@require_permission('task.create')
 def add_task(request):
     title = request.data.get("title")
     description = request.data.get("description")
@@ -1393,6 +1413,7 @@ def add_task(request):
     }, status=201)
 
 @api_view(['GET'])
+@require_permission('task.view')
 def view_tasks(request):
     tasks = Task.objects.filter(company=request.company).select_related(
         "assigned_to", "lead", "contact", "deal", "account"
@@ -1428,6 +1449,7 @@ def view_tasks(request):
 
 
 @api_view(['GET'])
+@require_permission('task.view')
 def view_single_task(request, id):
     task = get_object_or_404(
         Task.objects.select_related("assigned_to", "lead", "contact", "deal", "account"),
@@ -1462,6 +1484,7 @@ def view_single_task(request, id):
 
 
 @api_view(['PUT'])
+@require_permission('task.edit')
 def update_task(request, id):
     try:
         task = Task.objects.get(id=id, company=request.company)
@@ -1550,6 +1573,7 @@ def update_task(request, id):
 
 
 @api_view(['DELETE'])
+@require_permission('task.delete')
 def delete_task(request, id):
     try:
         task = Task.objects.get(id=id, company=request.company)
@@ -1563,6 +1587,7 @@ def delete_task(request, id):
 
 # ............staff(user)...............
 @api_view(["POST"])
+@require_permission('staff.create')
 def add_staff(request):
 
     full_name = request.data.get("full_name")
@@ -1622,6 +1647,7 @@ def add_staff(request):
 
 
 @api_view(['GET'])
+@require_permission('staff.view')
 def view_staff(request):
     staffs = Staff.objects.filter(company=request.company).select_related("user")
     data = []
@@ -1642,6 +1668,7 @@ def view_staff(request):
 
 
 @api_view(['GET'])
+@require_permission('staff.view')
 def view_single_staff(request, id):
     staff = get_object_or_404(Staff.objects.select_related("company", "user"), id=id, company=request.company)
 
@@ -1660,6 +1687,7 @@ def view_single_staff(request, id):
     return JsonResponse(data, safe=False)
 
 @api_view(['PUT'])
+@require_permission('staff.edit')
 def update_staff(request, id):
     try:
         staff = Staff.objects.get(id=id, company=request.company)
@@ -1678,6 +1706,7 @@ def update_staff(request, id):
 
 
 @api_view(['DELETE'])
+@require_permission('staff.delete')
 def delete_staff(request, id):
     staff = Staff.objects.get(id=id, company=request.company)
     staff.delete()
@@ -1689,6 +1718,7 @@ def delete_staff(request, id):
 from datetime import datetime
 
 @api_view(['GET'])
+@require_permission('report.view')
 def report_view(request):
     start_date = request.GET.get("start_date")
     end_date = request.GET.get("end_date")
@@ -1770,6 +1800,7 @@ def report_view(request):
 
 
 @api_view(["GET"])
+@require_permission('report.export')
 def report_pdf(request):
     """Generate and return a PDF version of the CRM summary report."""
     from io import BytesIO
@@ -1829,6 +1860,7 @@ def report_pdf(request):
 
 # ......... convert lead to customer through button ...........
 @api_view(['GET'])
+@require_permission('lead.convert')
 def get_lead_to_customer_prefill(request, lead_id):
     """Prefill customer form from lead data"""
     try:
@@ -2027,6 +2059,7 @@ def get_lead_to_customer_prefill(request, lead_id):
 #         "deal_id": deal.id if deal else None,
 #     })
 @api_view(["POST"])
+@require_permission('lead.convert')
 def convert_lead(request, lead_id):
     try:
         lead = Lead.objects.get(
@@ -2232,6 +2265,7 @@ def convert_lead(request, lead_id):
     
 # ............ unconverted lead show in dropdown ........
 @api_view(['GET'])
+@require_permission('lead.view')
 def get_unconverted_leads(request):
     leads = Lead.objects.exclude(status="converted", company=request.company)
     data = []
@@ -2245,6 +2279,7 @@ def get_unconverted_leads(request):
     return JsonResponse(data, safe=False)
 # ............ connect the deal to customer ..............
 @api_view(['GET'])
+@require_permission('deal.view')
 def get_linkable_deals(request):
     deals = Deal.objects.exclude(stage="Won")
     return JsonResponse([
@@ -2262,6 +2297,7 @@ def get_linkable_deals(request):
 
 # ......... view total leads ...........
 @api_view(['GET'])
+@require_permission('lead.view')
 def leads_by_source(request):
     sources = (
         Lead.objects
@@ -2299,6 +2335,7 @@ def leads_by_source(request):
 # .......... Add, Edit, View, Delete the choices ...........
 
 @api_view(['GET'])
+@require_permission('picklist.view')
 def view_picklists(request):
     field = request.GET.get("field")
  
@@ -2318,6 +2355,7 @@ def view_picklists(request):
  
  
 @api_view(['POST'])
+@require_permission('picklist.create')
 def add_picklist_option(request):
     field = request.data.get("field")
     value = request.data.get("value")
@@ -2351,6 +2389,7 @@ def add_picklist_option(request):
  
  
 @api_view(['PUT'])
+@require_permission('picklist.edit')
 def update_picklist_option(request, id):
     try:
         option = PicklistOption.objects.get(
@@ -2367,6 +2406,7 @@ def update_picklist_option(request, id):
  
  
 @api_view(['DELETE'])
+@require_permission('picklist.delete')
 def delete_picklist_option(request, id):
     try:
         option = PicklistOption.objects.get(
@@ -2381,6 +2421,7 @@ def delete_picklist_option(request, id):
 # .............. account ................
 
 @api_view(['POST'])
+@require_permission('account.create')
 def add_account(request):
     account_name = request.data.get("acc_name")
     assigned_to_id = request.data.get("assigned_to")
@@ -2444,6 +2485,7 @@ def add_account(request):
     
 
 @api_view(['GET'])
+@require_permission('account.view')
 def view_accounts(request):
     accounts = Accounts.objects.filter(company=request.company).select_related(
         "billing_address", "shipping_address", "assigned_to", "parent_account"
@@ -2492,6 +2534,7 @@ def view_accounts(request):
 
 
 @api_view(['GET'])
+@require_permission('account.view')
 def view_single_account(request, id):
     account = get_object_or_404(
         Accounts.objects.select_related("billing_address", "shipping_address", "assigned_to", "parent_account"),
@@ -2540,6 +2583,7 @@ def view_single_account(request, id):
 
 
 @api_view(['PUT'])
+@require_permission('account.edit')
 def update_account(request, id):
     try:
         account = Accounts.objects.get(id=id, company=request.company)
@@ -2616,6 +2660,7 @@ def update_account(request, id):
 
 
 @api_view(['DELETE'])
+@require_permission('account.delete')
 def delete_account(request, id):
     account = Accounts.objects.get(id=id, company=request.company)
     account.delete()
@@ -2657,6 +2702,7 @@ def _serialize_address(addr):
 
 
 @api_view(['POST'])
+@require_permission('quote.create')
 def add_quote(request):
     subject = request.data.get("subject")
     quote_stage = request.data.get("quote_stage", "draft")
@@ -2800,6 +2846,7 @@ def add_quote(request):
     
 
 @api_view(['GET'])
+@require_permission('quote.view')
 def view_quotes(request):
     quotes = (
         Quotes.objects.filter(company=request.company)
@@ -2846,6 +2893,7 @@ def view_quotes(request):
 
 
 @api_view(['GET'])
+@require_permission('quote.view')
 def view_single_quote(request, id):
 
     quote = get_object_or_404(
@@ -2882,6 +2930,7 @@ def view_single_quote(request, id):
     return JsonResponse(data)
 
 @api_view(['PUT'])
+@require_permission('quote.edit')
 def update_quote(request, id):
 
     quote = get_object_or_404(
@@ -3011,6 +3060,7 @@ def update_quote(request, id):
 
 
 @api_view(["DELETE"])
+@require_permission('quote.delete')
 def delete_quote(request, id):
     try:
         quote = Quotes.objects.get(id=id, company=request.company)
@@ -3031,6 +3081,7 @@ def delete_quote(request, id):
 
 # .................. meeting ...............
 @api_view(['POST'])
+@require_permission('meeting.create')
 def add_meeting(request):
     title = request.data.get("title")
     meeting_venue = request.data.get("meeting_venue", "online")
@@ -3099,6 +3150,7 @@ def add_meeting(request):
 
 
 @api_view(['GET'])
+@require_permission('meeting.view')
 def view_meetings(request):
     meetings = (
         Meeting.objects.filter(company=request.company)
@@ -3133,6 +3185,7 @@ def view_meetings(request):
 
 
 @api_view(['GET'])
+@require_permission('meeting.view')
 def view_single_meeting(request, id):
     meeting = get_object_or_404(
         Meeting.objects.select_related(
@@ -3165,6 +3218,7 @@ def view_single_meeting(request, id):
 
 
 @api_view(['PUT'])
+@require_permission('meeting.edit')
 def update_meeting(request, id):
     try:
         meeting = Meeting.objects.get(id=id, company=request.company)
@@ -3255,6 +3309,7 @@ def update_meeting(request, id):
 
 
 @api_view(['DELETE'])
+@require_permission('meeting.delete')
 def delete_meeting(request, id):
     try:
         meeting = Meeting.objects.get(id=id, company=request.company)
@@ -3267,6 +3322,7 @@ def delete_meeting(request, id):
 
 # ................ calls ....................
 @api_view(['POST'])
+@require_permission('call.create')
 def add_call(request):
     subject = request.data.get("subject")
     call_type = request.data.get("call_type")
@@ -3329,6 +3385,7 @@ def add_call(request):
 
 
 @api_view(['GET'])
+@require_permission('call.view')
 def view_calls(request):
     calls = (
         Call.objects.filter(company=request.company)
@@ -3360,6 +3417,7 @@ def view_calls(request):
 
 
 @api_view(['GET'])
+@require_permission('call.view')
 def view_single_call(request, id):
     call = get_object_or_404(
         Call.objects.select_related("assigned_to", "lead", "contact", "deal", "account"),
@@ -3388,6 +3446,7 @@ def view_single_call(request, id):
 
 
 @api_view(['PUT'])
+@require_permission('call.edit')
 def update_call(request, id):
     try:
         call = Call.objects.get(id=id, company=request.company)
@@ -3463,6 +3522,7 @@ def update_call(request, id):
 
 
 @api_view(['DELETE'])
+@require_permission('call.delete')
 def delete_call(request, id):
     try:
         call = Call.objects.get(id=id, company=request.company)
@@ -3475,6 +3535,7 @@ def delete_call(request, id):
 
 # .............. vendor ................
 @api_view(['GET'])
+@require_permission('vendor.view')
 def get_vendor_prefill(request, vendor_id):
     """Fetch vendor address to prefill purchase order form"""
     vendor = get_object_or_404(Vendor, id=vendor_id, company=request.company)
@@ -3485,6 +3546,7 @@ def get_vendor_prefill(request, vendor_id):
 
 
 @api_view(['POST'])
+@require_permission('vendor.create')
 def add_vendor(request):
     vendor_name = request.data.get("vendor_name")
     vendor_code = request.data.get("vendor_code")
@@ -3529,6 +3591,7 @@ def add_vendor(request):
 
 
 @api_view(['GET'])
+@require_permission('vendor.view')
 def view_vendors(request):
     vendors = (
         Vendor.objects.filter(company=request.company)
@@ -3559,6 +3622,7 @@ def view_vendors(request):
 
 
 @api_view(['GET'])
+@require_permission('vendor.view')
 def view_single_vendor(request, id):
     vendor = get_object_or_404(Vendor.objects.select_related("address"), id=id, company=request.company)
 
@@ -3583,6 +3647,7 @@ def view_single_vendor(request, id):
 
 
 @api_view(['PUT'])
+@require_permission('vendor.edit')
 def update_vendor(request, id):
     try:
         vendor = Vendor.objects.select_related("address").get(id=id, company=request.company)
@@ -3630,6 +3695,7 @@ def update_vendor(request, id):
 
 
 @api_view(['DELETE'])
+@require_permission('vendor.delete')
 def delete_vendor(request, id):
     try:
         vendor = Vendor.objects.get(id=id, company=request.company)
@@ -3643,6 +3709,7 @@ def delete_vendor(request, id):
 
 
 @api_view(['POST'])
+@require_permission('product.create')
 def add_product(request):
     name = request.data.get("name")
     product_code = request.data.get("product_code")
@@ -3697,6 +3764,7 @@ def add_product(request):
 
 
 @api_view(['GET'])
+@require_permission('product.view')
 def view_products(request):
     products = ( 
         Product.objects.filter(company=request.company)
@@ -3731,6 +3799,7 @@ def view_products(request):
 
 
 @api_view(['GET'])
+@require_permission('product.view')
 def view_single_product(request, id):
     product = get_object_or_404(Product.objects.select_related("vendor"), id=id, company=request.company)
 
@@ -3760,6 +3829,7 @@ def view_single_product(request, id):
 
 
 @api_view(['PUT'])
+@require_permission('product.edit')
 def update_product(request, id):
     try:
         product = Product.objects.get(id=id, company=request.company)
@@ -3809,6 +3879,7 @@ def update_product(request, id):
 
 
 @api_view(['DELETE'])
+@require_permission('product.delete')
 def delete_product(request, id):
     try:
         product = Product.objects.get(id=id, company=request.company)
@@ -3821,6 +3892,7 @@ def delete_product(request, id):
 
 # ---------------- PRICE BOOK ----------------
 @api_view(['POST'])
+@require_permission('pricebook.create')
 def add_price_book(request):
     name = request.data.get("name")
     description = request.data.get("description", "")
@@ -3846,6 +3918,7 @@ def add_price_book(request):
 
 
 @api_view(['GET'])
+@require_permission('pricebook.view')
 def view_price_books(request):
     price_books = PriceBook.objects.all()
 
@@ -3865,6 +3938,7 @@ def view_price_books(request):
 
 
 @api_view(['GET'])
+@require_permission('pricebook.view')
 def view_single_price_book(request, id):
     price_book = get_object_or_404(PriceBook, id=id)
 
@@ -3892,6 +3966,7 @@ def view_single_price_book(request, id):
 
 
 @api_view(['PUT'])
+@require_permission('pricebook.edit')
 def update_price_book(request, id):
     try:
         price_book = PriceBook.objects.get(id=id, company=request.company)
@@ -3917,6 +3992,7 @@ def update_price_book(request, id):
 
 
 @api_view(['DELETE'])
+@require_permission('pricebook.delete')
 def delete_price_book(request, id):
     try:
         price_book = PriceBook.objects.get(id=id, company=request.company)
@@ -3928,6 +4004,7 @@ def delete_price_book(request, id):
 
 # ---------------- PRICE BOOK ITEM ----------------
 @api_view(['POST'])
+@require_permission('pricebook.create')
 def add_price_book_item(request):
     price_book_id = request.data.get("price_book_id")
     product_id = request.data.get("product_id")
@@ -3956,6 +4033,7 @@ def add_price_book_item(request):
 
 
 @api_view(['GET'])
+@require_permission('pricebook.view')
 def view_price_book_items(request):
     items = PriceBookItem.objects.select_related("price_book", "product").all()
 
@@ -3979,6 +4057,7 @@ def view_price_book_items(request):
 
 
 @api_view(['GET'])
+@require_permission('pricebook.view')
 def view_single_price_book_item(request, id):
     item = get_object_or_404(PriceBookItem.objects.select_related("price_book", "product"), id=id)
 
@@ -3996,6 +4075,7 @@ def view_single_price_book_item(request, id):
 
 
 @api_view(['PUT'])
+@require_permission('pricebook.edit')
 def update_price_book_item(request, id):
     try:
         item = PriceBookItem.objects.get(id=id, company=request.company)
@@ -4023,6 +4103,7 @@ def update_price_book_item(request, id):
 
 
 @api_view(['DELETE'])
+@require_permission('pricebook.delete')
 def delete_price_book_item(request, id):
     try:
         item = PriceBookItem.objects.get(id=id, company=request.company)
@@ -4074,6 +4155,7 @@ def _update_address(existing, data):
 
 
 @api_view(['GET'])
+@require_permission('salesorder.create')
 def get_quote_prefill(request, quote_id):
     quote = get_object_or_404(
         Quotes.objects.select_related(
@@ -4124,6 +4206,7 @@ def get_quote_prefill(request, quote_id):
 
 
 @api_view(['POST'])
+@require_permission('salesorder.create')
 def add_sales_order(request):
     subject = request.data.get("subject")
     customer_id = request.data.get("customer_id")
@@ -4259,6 +4342,7 @@ def add_sales_order(request):
 
 
 @api_view(['GET'])
+@require_permission('salesorder.view')
 def view_sales_orders(request):
     orders = (
         SalesOrder.objects.filter(company=request.company)
@@ -4319,6 +4403,7 @@ def view_sales_orders(request):
 
 
 @api_view(['GET'])
+@require_permission('salesorder.view')
 def view_single_sales_order(request, id):
     order = get_object_or_404(
         SalesOrder.objects.select_related("owner", "customer", "quote", "deal", "billing_address", "shipping_address").prefetch_related("items__product"),
@@ -4368,6 +4453,7 @@ def view_single_sales_order(request, id):
 
 
 @api_view(['PUT'])
+@require_permission('salesorder.edit')
 def update_sales_order(request, id):
     try:
         order = SalesOrder.objects.get(id=id, company=request.company)
@@ -4461,6 +4547,7 @@ def update_sales_order(request, id):
 
 
 @api_view(['DELETE'])
+@require_permission('salesorder.delete')
 def delete_sales_order(request, id):
     try:
         order = SalesOrder.objects.get(id=id, company=request.company)
@@ -4473,6 +4560,7 @@ def delete_sales_order(request, id):
 
 # ............... invioce .................
 @api_view(['GET'])
+@require_permission('invoice.create')
 def get_sales_order_prefill(request, sales_order_id):
     """Fetch sales order data to prefill invoice form"""
     order = get_object_or_404(
@@ -4510,6 +4598,7 @@ def get_sales_order_prefill(request, sales_order_id):
 
 
 @api_view(['POST'])
+@require_permission('invoice.create')
 def add_invoice(request):
     subject = request.data.get("subject")
     customer_id = request.data.get("customer_id")
@@ -4630,6 +4719,7 @@ def add_invoice(request):
 
 
 @api_view(['GET'])
+@require_permission('invoice.view')
 def view_invoices(request):
     invoices = (
         Invoice.objects.filter(company=request.company)
@@ -4685,6 +4775,7 @@ def view_invoices(request):
 
 
 @api_view(['GET'])
+@require_permission('invoice.view')
 def view_single_invoice(request, id):
     invoice = get_object_or_404(
         Invoice.objects.select_related("owner", "customer", "sales_order", "billing_address", "shipping_address").prefetch_related("items__product"),
@@ -4730,6 +4821,7 @@ def view_single_invoice(request, id):
 
 
 @api_view(['PUT'])
+@require_permission('invoice.edit')
 def update_invoice(request, id):
     try:
         invoice = Invoice.objects.get(id=id, company=request.company)
@@ -4812,6 +4904,7 @@ def update_invoice(request, id):
         return HttpResponse(str(e), status=500)
 
 @api_view(['DELETE'])
+@require_permission('invoice.delete')
 def delete_invoice(request, id):
     try:
         invoice = Invoice.objects.get(id=id, company=request.company)
@@ -4835,6 +4928,7 @@ def _address_dict(address):
 
 
 @api_view(["GET"])
+@require_permission('invoice.view')
 def invoice_pdf(request, pk):
     try:
         invoice = Invoice.objects.select_related(
@@ -4895,6 +4989,7 @@ def invoice_pdf(request, pk):
 
 # .............. purchase order ...............
 @api_view(['POST'])
+@require_permission('purchaseorder.create')
 def add_purchase_order(request):
     subject = request.data.get("subject")
     vendor_id = request.data.get("vendor_id")
@@ -4969,6 +5064,7 @@ def add_purchase_order(request):
 
 
 @api_view(['GET'])
+@require_permission('purchaseorder.view')
 def view_purchase_orders(request):
     orders = (
         PurchaseOrder.objects.filter(company=request.company)
@@ -5021,6 +5117,7 @@ def view_purchase_orders(request):
 
 
 @api_view(['GET'])
+@require_permission('purchaseorder.view')
 def view_single_purchase_order(request, id):
     order = get_object_or_404(
         PurchaseOrder.objects.select_related("owner", "vendor", "billing_address", "shipping_address").prefetch_related("items__product"),
@@ -5064,6 +5161,7 @@ def view_single_purchase_order(request, id):
 
 
 @api_view(['PUT'])
+@require_permission('purchaseorder.edit')
 def update_purchase_order(request, id):
     try:
         order = PurchaseOrder.objects.get(id=id, company=request.company)
@@ -5143,6 +5241,7 @@ def update_purchase_order(request, id):
 
 
 @api_view(['DELETE'])
+@require_permission('purchaseorder.delete')
 def delete_purchase_order(request, id):
     try:
         order = PurchaseOrder.objects.get(id=id, company=request.company)
@@ -5155,6 +5254,7 @@ def delete_purchase_order(request, id):
 
 # ............... case ...............
 @api_view(['POST'])
+@require_permission('case.create')
 def add_case(request):
     subject = request.data.get("subject")
     description = request.data.get("description")
@@ -5209,6 +5309,7 @@ def add_case(request):
 
 
 @api_view(['GET'])
+@require_permission('case.view')
 def view_cases(request):
     cases = Case.objects.filter(company=request.company).select_related(
         "customer", "account", "product", "assigned_to", "created_by"
@@ -5244,6 +5345,7 @@ def view_cases(request):
 
 
 @api_view(['GET'])
+@require_permission('case.view')
 def view_single_case(request, id):
     case = get_object_or_404(
         Case.objects.select_related("customer", "account", "product", "assigned_to", "created_by"),
@@ -5275,6 +5377,7 @@ def view_single_case(request, id):
 
 
 @api_view(['PUT'])
+@require_permission('case.edit')
 def update_case(request, id):
     try:
         case = Case.objects.get(id=id, company=request.company)
@@ -5336,6 +5439,7 @@ def update_case(request, id):
 
 
 @api_view(['DELETE'])
+@require_permission('case.delete')
 def delete_case(request, id):
     try:
         case = Case.objects.get(id=id, company=request.company)
@@ -5347,6 +5451,7 @@ def delete_case(request, id):
 
 
 @api_view(['POST'])
+@require_permission('casesolution.create')
 def add_case_solution(request):
     company_id = request.data.get("company_id")
     title = request.data.get("title")
@@ -5381,6 +5486,7 @@ def add_case_solution(request):
 
 
 @api_view(['GET'])
+@require_permission('casesolution.view')
 def view_case_solutions(request):
     case_solutions = CaseSolution.objects.select_related("company", "created_by").all()
 
@@ -5416,6 +5522,7 @@ def view_case_solutions(request):
 
 
 @api_view(['GET'])
+@require_permission('casesolution.view')
 def view_single_case_solution(request, id):
     cs = get_object_or_404(CaseSolution.objects.select_related("company", "created_by"), id=id)
 
@@ -5437,6 +5544,7 @@ def view_single_case_solution(request, id):
 
 
 @api_view(['PUT'])
+@require_permission('casesolution.edit')
 def update_case_solution(request, id):
     try:
         cs = CaseSolution.objects.get(id=id)
@@ -5468,6 +5576,7 @@ def update_case_solution(request, id):
 
 
 @api_view(['DELETE'])
+@require_permission('casesolution.delete')
 def delete_case_solution(request, id):
     try:
         cs = CaseSolution.objects.get(id=id)
@@ -5480,6 +5589,7 @@ def delete_case_solution(request, id):
 
 # ............... services ..................
 @api_view(['POST'])
+@require_permission('service.create')
 def add_service(request):
     service_name = request.data.get("service_name")
     service_code = request.data.get("service_code")
@@ -5512,6 +5622,7 @@ def add_service(request):
 
 
 @api_view(['GET'])
+@require_permission('service.view')
 def view_services(request):
     services = Service.objects.filter(company=request.company)
 
@@ -5537,6 +5648,7 @@ def view_services(request):
 
 
 @api_view(['GET'])
+@require_permission('service.view')
 def view_single_service(request, id):
     service = get_object_or_404(Service, id=id, company=request.company)
 
@@ -5558,6 +5670,7 @@ def view_single_service(request, id):
 
 
 @api_view(['PUT'])
+@require_permission('service.edit')
 def update_service(request, id):
     try:
         service = Service.objects.get(id=id, company=request.company)
@@ -5589,6 +5702,7 @@ def update_service(request, id):
 
 
 @api_view(['DELETE'])
+@require_permission('service.delete')
 def delete_service(request, id):
     try:
         service = Service.objects.get(id=id, company=request.company)
@@ -5855,6 +5969,7 @@ def change_password(request):
 # .............. twilio settings ...................
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
+@require_permission('twilio.view')
 def get_twilio_settings(request):
     company = getattr(request, "company", None) or getattr(getattr(request.user, "staff", None), "company", None)
     if not company:
@@ -5875,6 +5990,7 @@ def get_twilio_settings(request):
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
+@require_permission('twilio.manage')
 def save_twilio_settings(request):
     """
     Body:
@@ -5931,6 +6047,7 @@ def save_twilio_settings(request):
 
 @api_view(["POST", "DELETE"])
 @permission_classes([IsAuthenticated])
+@require_permission('twilio.manage')
 def disconnect_twilio(request):
     company = getattr(request, "company", None) or getattr(getattr(request.user, "staff", None), "company", None)
     if not company:
@@ -6005,6 +6122,7 @@ def normalize_e164_phone(raw_phone, default_country_code="+91"):
 # ---------------------------------------------------------------------------
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
+@require_permission('call.dial')
 def dial_out(request):
     """
     Body:
@@ -6199,6 +6317,7 @@ def call_status_callback(request):
 # ---------------------------------------------------------------------------
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
+@require_permission('call.view')
 def call_history(request):
     """
     Query params: ?lead_id=  or  ?contact_id=  or  ?deal_id=  or  ?account_id=
