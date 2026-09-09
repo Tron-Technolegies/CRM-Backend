@@ -38,6 +38,12 @@ TWILIO_CALLER_ID = os.getenv("TWILIO_CALLER_ID")           # your Twilio number
 BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "https://crm-backend-ejfr.onrender.com").rstrip("/")
 FIELD_ENCRYPTION_KEY = os.getenv("FIELD_ENCRYPTION_KEY")
 
+# Google OAuth / Gmail Integration
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "https://crm-backend-ejfr.onrender.com/api/admin/email/callback/")
+
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 

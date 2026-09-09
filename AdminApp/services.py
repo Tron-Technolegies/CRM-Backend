@@ -38,6 +38,48 @@ def _send_email_async(subject, message, from_email, recipient_list):
     except Exception as e:
         logger.warning(f"Async email sending failed: {e}")
 
+
+def _send_company_email_async(company, subject, message, recipient_list):
+    """
+    Attempt to send via the company's connected Gmail integration.
+    Falls back to the system SMTP backend if Gmail is not connected.
+    """
+    try:
+        from AdminApp.email_service import get_company_email_integration, send_company_email
+        integration = get_company_email_integration(company)
+        if integration:
+            result = send_company_email(
+                company=company,
+                to=recipient_list,
+                subject=subject,
+                body=message,
+            )
+            if not result.get("success"):
+                logger.warning(
+                    "Gmail send failed for company_id=%s, falling back to SMTP: %s",
+                    company.id,
+                    result.get("error"),
+                )
+                # Fall through to SMTP below
+            else:
+                return
+    except Exception as e:
+        logger.warning("Gmail email attempt failed, falling back to SMTP: %s", e)
+
+    # SMTP fallback
+    try:
+        send_mail(
+            subject=subject,
+            message=message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=recipient_list,
+            fail_silently=True,
+        )
+    except Exception as e:
+        logger.warning(f"SMTP fallback email sending failed: {e}")
+
+
+
 def notify_user(
     *,
     company,
@@ -119,11 +161,12 @@ def notify_user(
 
     if send_email and target_email:
         thread = threading.Thread(
-            target=_send_email_async,
-            args=(title, message, settings.DEFAULT_FROM_EMAIL, [target_email]),
+            target=_send_company_email_async,
+            args=(company, title, message, [target_email]),
             daemon=True,
         )
         thread.start()
+
 
     return notification
 

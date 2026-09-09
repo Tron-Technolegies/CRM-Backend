@@ -21,10 +21,13 @@ class CompanyMiddleware:
             "/admin/",
             "/api/admin/integrations/meta/callback/",
             "/api/admin/webhooks/meta/",
+            # Gmail OAuth callback: Google redirects the browser here without a JWT
+            "/api/admin/email/callback/",
             # --- Twilio webhooks: hit directly by Twilio's servers, no JWT ---
             "/api/admin/calls/connect-twiml/",
             "/api/admin/calls/status-callback/",
         ]
+
 
         if any(request.path.startswith(path) for path in public_paths):
             return self.get_response(request)

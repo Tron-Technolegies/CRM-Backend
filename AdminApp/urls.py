@@ -170,4 +170,11 @@ urlpatterns= [
     path('calls/twilio-settings/', views.get_twilio_settings, name='twilio-settings-get'),
     path('calls/twilio-settings/save/', views.save_twilio_settings, name='twilio-settings-save'),
     path('calls/twilio-settings/disconnect/', views.disconnect_twilio, name='twilio-settings-disconnect'),
-]
+
+    # ── Gmail / Email Integration ──────────────────────────────────────────────
+    path('email/connect/', views.email_connect, name='email-connect'),
+    path('email/callback/', views.email_callback, name='email-callback'),
+    path('email/status/', views.email_status, name='email-status'),
+    path('email/disconnect/', views.email_disconnect, name='email-disconnect'),
+    path('email/send/', views.email_send_api, name='email-send'),
+]

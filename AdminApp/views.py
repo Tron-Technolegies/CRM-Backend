@@ -60,6 +60,7 @@ from django.utils.dateparse import parse_date
 from AdminApp.services import create_lead_for_company, get_related_label, notify_user
 
 from .models import (
+    EmailIntegration,
     MetaIntegration,
     Meeting,
     MeetingParticipant,
@@ -7243,4 +7244,282 @@ def call_history(request):
         for c in qs[:100]
     ]
     return Response({"results": data})
- 
+
+
+# ============================================================
+# Gmail OAuth Email Integration
+# ============================================================
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+@require_permission("integration.manage")
+def email_connect(request):
+    """
+    GET /api/admin/email/connect/
+    Returns the Google OAuth URL the frontend should redirect the user to.
+    Scopes requested:
+      - https://www.googleapis.com/auth/gmail.send  (send emails)
+      - https://www.googleapis.com/auth/userinfo.email (identify the account)
+    """
+    company = getattr(request, "company", None)
+    staff = getattr(request, "staff", None)
+    if not company:
+        return Response({"error": "No company associated with this user."}, status=400)
+
+    # Signed state embeds company + staff so callback can restore context
+    state = signing.dumps(
+        {"company_id": company.id, "staff_id": staff.id if staff else None},
+        salt="gmail-oauth",
+    )
+
+    params = {
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/userinfo.email",
+        "access_type": "offline",
+        "prompt": "consent",   # always prompt so we receive a refresh_token
+        "state": state,
+    }
+
+    auth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
+    return Response({"auth_url": auth_url})
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+@authentication_classes([])
+def email_callback(request):
+    """
+    GET /api/admin/email/callback/
+    Public path — Google redirects the user's browser here after OAuth consent.
+    Validates the signed state, exchanges the auth code for tokens, retrieves
+    the Gmail address, and stores everything encrypted in EmailIntegration.
+    Redirects the browser to the frontend Settings page.
+    """
+    frontend_url = settings.FRONTEND_URL.rstrip("/")
+    settings_page = f"{frontend_url}/settings/email"
+
+    code = request.GET.get("code", "").strip()
+    state = request.GET.get("state", "").strip()
+    error = request.GET.get("error", "").strip()
+
+    # User denied access
+    if error:
+        logger.warning("Gmail OAuth denied by user: %s", error)
+        return redirect(f"{settings_page}?gmail=error&reason=access_denied")
+
+    if not code:
+        return redirect(f"{settings_page}?gmail=error&reason=no_code")
+
+    if not state:
+        return redirect(f"{settings_page}?gmail=error&reason=no_state")
+
+    # --- Validate signed state (max 10 minutes old) ----------------
+    try:
+        state_data = signing.loads(state, salt="gmail-oauth", max_age=600)
+        company_id = state_data["company_id"]
+    except (signing.BadSignature, signing.SignatureExpired, KeyError):
+        logger.warning("Gmail OAuth: invalid or expired state parameter")
+        return redirect(f"{settings_page}?gmail=error&reason=bad_state")
+
+    # --- Resolve company -------------------------------------------
+    try:
+        company = Company.objects.get(id=company_id)
+    except Company.DoesNotExist:
+        logger.error("Gmail callback: company not found: %s", company_id)
+        return redirect(f"{settings_page}?gmail=error&reason=company_not_found")
+
+    # --- Exchange code for tokens ----------------------------------
+    try:
+        token_resp = requests.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": settings.GOOGLE_CLIENT_ID,
+                "client_secret": settings.GOOGLE_CLIENT_SECRET,
+                "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            },
+            timeout=30,
+        )
+        token_data = token_resp.json()
+    except requests.RequestException:
+        logger.exception("Gmail token exchange request failed")
+        return redirect(f"{settings_page}?gmail=error&reason=token_exchange_failed")
+
+    if "error" in token_data:
+        logger.warning("Gmail token exchange error: %s", token_data.get("error"))
+        return redirect(f"{settings_page}?gmail=error&reason=token_exchange_failed")
+
+    access_token_raw = token_data.get("access_token", "")
+    refresh_token_raw = token_data.get("refresh_token", "")
+    expires_in = token_data.get("expires_in", 3600)
+
+    if not access_token_raw:
+        return redirect(f"{settings_page}?gmail=error&reason=no_access_token")
+
+    # --- Retrieve Gmail address via userinfo endpoint ---------------
+    gmail_email = ""
+    try:
+        userinfo_resp = requests.get(
+            "https://www.googleapis.com/oauth2/v3/userinfo",
+            headers={"Authorization": f"Bearer {access_token_raw}"},
+            timeout=15,
+        )
+        userinfo = userinfo_resp.json()
+        gmail_email = userinfo.get("email", "")
+    except Exception:
+        logger.exception("Gmail callback: failed to retrieve userinfo")
+        # Non-fatal — store what we have, email can be updated later
+
+    # --- Persist encrypted tokens to EmailIntegration --------------
+    from datetime import datetime, timedelta, timezone as py_timezone
+    token_expiry = datetime.now(tz=py_timezone.utc) + timedelta(seconds=int(expires_in))
+
+    integration, _ = EmailIntegration.objects.get_or_create(company=company)
+    integration.provider = "gmail"
+    integration.email = gmail_email
+    integration.access_token = access_token_raw      # encrypted via property setter
+    if refresh_token_raw:
+        integration.refresh_token = refresh_token_raw  # encrypted via property setter
+    integration.token_expiry = token_expiry
+    integration.is_connected = True
+    integration.save()
+
+    logger.info(
+        "Gmail OAuth complete for company_id=%s email=%s",
+        company.id,
+        gmail_email,
+    )
+
+    safe_email = requests.utils.quote(gmail_email, safe="")
+    return redirect(f"{settings_page}?gmail=connected&email={safe_email}")
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+@require_permission("integration.view")
+def email_status(request):
+    """
+    GET /api/admin/email/status/
+    Returns the Gmail integration status for the authenticated user's company.
+    Never returns access_token or refresh_token.
+    """
+    company = getattr(request, "company", None)
+    if not company:
+        return Response({"error": "No company associated with this user."}, status=400)
+
+    try:
+        integration = EmailIntegration.objects.get(company=company)
+    except EmailIntegration.DoesNotExist:
+        return Response({"connected": False, "provider": None, "email": None})
+
+    return Response({
+        "connected": integration.is_connected,
+        "provider": integration.provider,
+        "email": integration.email,
+        "token_expiry": integration.token_expiry,
+        "updated_at": integration.updated_at,
+    })
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@require_permission("integration.manage")
+def email_disconnect(request):
+    """
+    POST /api/admin/email/disconnect/
+    Clears the Gmail credentials for the company and marks the integration
+    as disconnected. Optionally revokes the token with Google.
+    """
+    company = getattr(request, "company", None)
+    if not company:
+        return Response({"error": "No company associated with this user."}, status=400)
+
+    try:
+        integration = EmailIntegration.objects.get(company=company)
+    except EmailIntegration.DoesNotExist:
+        return Response({"connected": False, "message": "No Gmail account was connected."})
+
+    # Attempt to revoke token with Google (best-effort, non-fatal)
+    raw_token = ""
+    try:
+        raw_token = integration.access_token
+    except Exception:
+        pass
+
+    if raw_token:
+        try:
+            requests.post(
+                "https://oauth2.googleapis.com/revoke",
+                params={"token": raw_token},
+                headers={"Content-type": "application/x-www-form-urlencoded"},
+                timeout=10,
+            )
+        except Exception:
+            logger.warning("Gmail token revocation request failed (non-fatal)")
+
+    # Clear credentials
+    integration.access_token_encrypted = ""
+    integration.refresh_token_encrypted = ""
+    integration.token_expiry = None
+    integration.is_connected = False
+    integration.save(update_fields=[
+        "access_token_encrypted",
+        "refresh_token_encrypted",
+        "token_expiry",
+        "is_connected",
+        "updated_at",
+    ])
+
+    return Response({"connected": False, "message": "Gmail account disconnected successfully."})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@require_permission("integration.manage")
+def email_send_api(request):
+    """
+    POST /api/admin/email/send/
+    Convenience API to send an email from the company's connected Gmail account.
+
+    Body (JSON):
+    {
+        "to":      "recipient@example.com"  OR ["a@example.com", "b@example.com"],
+        "subject": "Hello",
+        "body":    "Plain text body",
+        "html_body": "<p>Optional HTML</p>",
+        "cc":      "cc@example.com"   (optional)
+    }
+    """
+    from AdminApp.email_service import send_company_email
+
+    company = getattr(request, "company", None)
+    if not company:
+        return Response({"error": "No company associated with this user."}, status=400)
+
+    to = request.data.get("to")
+    subject = request.data.get("subject", "").strip()
+    body = request.data.get("body", "")
+    html_body = request.data.get("html_body", None)
+    cc = request.data.get("cc", None)
+
+    if not to:
+        return Response({"error": "'to' field is required."}, status=400)
+    if not subject:
+        return Response({"error": "'subject' field is required."}, status=400)
+
+    result = send_company_email(
+        company=company,
+        to=to,
+        subject=subject,
+        body=body,
+        html_body=html_body,
+        cc=cc,
+    )
+
+    if result["success"]:
+        return Response({"message": "Email sent successfully.", "message_id": result["message_id"]})
+    else:
+        return Response({"error": result["error"]}, status=400)

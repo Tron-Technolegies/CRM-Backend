@@ -1207,3 +1207,59 @@ class TwilioSettings(models.Model):
 
     def __str__(self):
         return f"Twilio settings for {self.company}"
+
+
+class EmailIntegration(models.Model):
+    """
+    Stores a per-company Gmail OAuth 2.0 integration.
+    Access/refresh tokens are encrypted at rest using Fernet (FIELD_ENCRYPTION_KEY).
+    Never store or return raw token values through the API.
+    """
+
+    PROVIDER_CHOICES = [
+        ("gmail", "Gmail"),
+    ]
+
+    company = models.OneToOneField(
+        Company,
+        on_delete=models.CASCADE,
+        related_name="email_integration",
+    )
+    provider = models.CharField(max_length=50, choices=PROVIDER_CHOICES, default="gmail")
+    email = models.EmailField(max_length=255, blank=True, default="")
+
+    # Tokens stored encrypted at rest
+    access_token_encrypted = models.TextField(blank=True, default="")
+    refresh_token_encrypted = models.TextField(blank=True, default="")
+
+    token_expiry = models.DateTimeField(null=True, blank=True)
+    is_connected = models.BooleanField(default=False)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    # ── encrypted-field properties (same pattern as TwilioSettings) ────────────
+
+    @property
+    def access_token(self) -> str:
+        return decrypt_value(self.access_token_encrypted)
+
+    @access_token.setter
+    def access_token(self, raw_value: str):
+        self.access_token_encrypted = encrypt_value(raw_value)
+
+    @property
+    def refresh_token(self) -> str:
+        return decrypt_value(self.refresh_token_encrypted)
+
+    @refresh_token.setter
+    def refresh_token(self, raw_value: str):
+        self.refresh_token_encrypted = encrypt_value(raw_value)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["company"], name="emailintegration_company_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.company.name} - Gmail ({self.email or 'not connected'})"
