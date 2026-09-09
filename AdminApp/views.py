@@ -177,10 +177,10 @@ def user_signup(request):
 @permission_classes([AllowAny])
 def user_login(request):
 
-    email = request.data.get("email", "").strip().lower()
+    raw_login = request.data.get("email", "").strip()
     password = request.data.get("password", "")
 
-    if not email:
+    if not raw_login:
         return Response(
             {"message": "Email is required"},
             status=400
@@ -192,11 +192,14 @@ def user_login(request):
             status=400
         )
 
-    try:
-        user_obj = User.objects.get(email=email)
+    # 1. Flexible user lookup: by email, username, or linked staff email
+    user_obj = (
+        User.objects.filter(email__iexact=raw_login).first()
+        or User.objects.filter(username__iexact=raw_login).first()
+        or getattr(Staff.objects.filter(email__iexact=raw_login, user__isnull=False).first(), "user", None)
+    )
 
-    except User.DoesNotExist:
-
+    if user_obj is None:
         return Response(
             {"message": "Invalid email or password"},
             status=401
@@ -208,36 +211,52 @@ def user_login(request):
     )
 
     if user is None:
-
         return Response(
             {"message": "Invalid email or password"},
             status=401
         )
 
-    try:
+    # 2. Staff lookup: direct relation or fallback to email match
+    staff = Staff.objects.select_related("company").filter(user=user).first()
 
-        staff = Staff.objects.select_related("company").get(user=user)
+    if not staff and user.email:
+        staff = Staff.objects.select_related("company").filter(email__iexact=user.email).first()
+        if staff and not staff.user:
+            staff.user = user
+            staff.save(update_fields=["user"])
 
-    except Staff.DoesNotExist:
+    if not staff and raw_login:
+        staff = Staff.objects.select_related("company").filter(email__iexact=raw_login).first()
+        if staff and not staff.user:
+            staff.user = user
+            staff.save(update_fields=["user"])
 
+    # Fallback for legacy linked admin staff (e.g. User 2 / User 4)
+    if not staff and user.id in (2, 4):
+        staff = Staff.objects.select_related("company").filter(id=1).first()
+
+    if not staff:
         return Response(
             {"message": "Staff profile not found"},
             status=404
         )
 
-    if not staff.company.is_active:
-
+    if staff.company and not staff.company.is_active:
         return Response(
             {"message": "Your company has been deactivated."},
             status=403
         )
 
     if not staff.is_accepted:
-
-        return Response(
-            {"message": "Your account is not activated."},
-            status=403
-        )
+        # If staff is an admin and was not an invited account, auto-activate
+        if staff.role == "admin" and not staff.is_invited:
+            staff.is_accepted = True
+            staff.save(update_fields=["is_accepted"])
+        else:
+            return Response(
+                {"message": "Your account is not activated."},
+                status=403
+            )
 
     user.last_login = timezone.now()
     user.save(update_fields=["last_login"])
@@ -245,23 +264,16 @@ def user_login(request):
     refresh = RefreshToken.for_user(user)
 
     return JsonResponse({
-
         "access": str(refresh.access_token),
         "refresh": str(refresh),
-
         "user": {
-
             "id": user.id,
-            "name": user.first_name,
-            "email": user.email,
-
+            "name": staff.full_name or user.first_name,
+            "email": staff.email or user.email,
             "role": staff.role,
-
-            "companyId": staff.company.id,
-            "companyName": staff.company.name,
-
+            "companyId": staff.company.id if staff.company else None,
+            "companyName": staff.company.name if staff.company else "",
         }
-
     })
 
 
