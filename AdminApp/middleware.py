@@ -15,7 +15,9 @@ class CompanyMiddleware:
             "/api/admin/staff/login/",
             "/api/admin/staff/signup/",
             "/api/admin/auth/verify-invite/",
+            "/api/admin/staff/verify-invitation/",
             "/api/admin/staff/acceptinvitation/",
+            "/api/admin/staff/accept-invitation/",
             "/api/token/",
             "/api/token/refresh/",
             "/admin/",
@@ -46,9 +48,9 @@ class CompanyMiddleware:
             if not staff and user.email:
                 from AdminApp.models import Staff
                 staff = Staff.objects.select_related("company").filter(email__iexact=user.email).first()
-            if not staff and user.id in (2, 4):
-                from AdminApp.models import Staff
-                staff = Staff.objects.select_related("company").filter(id=1).first()
+                if staff and staff.user_id != user.id:
+                    staff.user = user
+                    staff.save(update_fields=["user"])
             request.user = user
             request.staff = staff
             request.company = staff.company if staff else None

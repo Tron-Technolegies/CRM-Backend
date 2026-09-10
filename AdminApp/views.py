@@ -3,6 +3,7 @@ import hashlib
 import logging
 import os
 import re
+import uuid
 import secrets
 import string
 import traceback
@@ -135,6 +136,9 @@ def user_signup(request):
         password=password,
         first_name=name,
     )
+    user.last_login = timezone.now()
+    user.save(update_fields=["last_login"])
+    user.refresh_from_db()
 
 
     staff = Staff.objects.create(
@@ -201,6 +205,13 @@ def user_login(request):
     )
 
     if user_obj is None:
+        # Check if an unaccepted staff invitation exists for this email
+        unaccepted_staff = Staff.objects.filter(email__iexact=raw_login, is_accepted=False).first()
+        if unaccepted_staff:
+            return Response(
+                {"message": "Please accept your email invitation to set your password before logging in."},
+                status=403
+            )
         return Response(
             {"message": "Invalid email or password"},
             status=401
@@ -212,6 +223,12 @@ def user_login(request):
     )
 
     if user is None:
+        # Check if credentials are correct but user is deactivated
+        if user_obj.check_password(password) and not user_obj.is_active:
+            return Response(
+                {"message": "Your account has been deactivated."},
+                status=403
+            )
         return Response(
             {"message": "Invalid email or password"},
             status=401
@@ -222,25 +239,20 @@ def user_login(request):
 
     if not staff and user.email:
         staff = Staff.objects.select_related("company").filter(email__iexact=user.email).first()
-        if staff and not staff.user:
-            staff.user = user
-            staff.save(update_fields=["user"])
 
     if not staff and raw_login:
         staff = Staff.objects.select_related("company").filter(email__iexact=raw_login).first()
-        if staff and not staff.user:
-            staff.user = user
-            staff.save(update_fields=["user"])
-
-    # Fallback for legacy linked admin staff (e.g. User 2 / User 4)
-    if not staff and user.id in (2, 4):
-        staff = Staff.objects.select_related("company").filter(id=1).first()
 
     if not staff:
         return Response(
             {"message": "Staff profile not found"},
             status=404
         )
+
+    # Ensure the staff record is linked to this authenticated User
+    if staff.user_id != user.id:
+        staff.user = user
+        staff.save(update_fields=["user"])
 
     if staff.company and not staff.company.is_active:
         return Response(
@@ -255,12 +267,13 @@ def user_login(request):
             staff.save(update_fields=["is_accepted"])
         else:
             return Response(
-                {"message": "Your account is not activated."},
+                {"message": "Your account is not activated. Please accept your invitation first."},
                 status=403
             )
 
     user.last_login = timezone.now()
     user.save(update_fields=["last_login"])
+    user.refresh_from_db()
 
     refresh = RefreshToken.for_user(user)
 
@@ -290,65 +303,129 @@ def user_logout(request):
         return Response({"error": str(e)}, status=400)
 
 
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def verify_invitation(request):
+    """
+    Validates an invitation token and returns non-sensitive staff/company details.
+    """
+    token = request.GET.get("token") or request.query_params.get("token")
+    if not token:
+        return Response({"message": "Invitation token is required."}, status=400)
+
+    try:
+        uuid_obj = uuid.UUID(str(token).strip())
+    except (ValueError, AttributeError):
+        return Response({"message": "Invalid invitation token format."}, status=400)
+
+    staff = Staff.objects.select_related("company").filter(invitation_token=uuid_obj).first()
+    if not staff:
+        return Response({"message": "Invitation not found or has already been used."}, status=404)
+
+    if staff.is_accepted:
+        return Response({
+            "message": "This invitation has already been accepted. Please log in.",
+            "is_accepted": True,
+        }, status=400)
+
+    return Response({
+        "valid": True,
+        "email": staff.email,
+        "fullName": staff.full_name,
+        "role": staff.role,
+        "department": staff.department,
+        "companyName": staff.company.name if staff.company else "",
+    }, status=200)
+
+
 @api_view(["POST"])
 @permission_classes([AllowAny])
+@transaction.atomic
 def accept_invitation(request):
-
+    """
+    Accepts staff invitation, creates or updates Django User, sets password,
+    marks staff as accepted, and returns JWT tokens.
+    """
     token = request.data.get("token")
     password = request.data.get("password")
 
     if not token or not password:
         return Response(
-            {
-                "message": "Token and password are required."
-            },
+            {"message": "Token and password are required."},
+            status=400
+        )
+
+    if len(password) < 8:
+        return Response(
+            {"message": "Password must be at least 8 characters long."},
             status=400
         )
 
     try:
-        staff = Staff.objects.get(
+        uuid_obj = uuid.UUID(str(token).strip())
+    except (ValueError, AttributeError):
+        return Response({"message": "Invalid invitation token format."}, status=400)
 
-            invitation_token=token,
-            is_accepted=False,
+    staff = Staff.objects.select_related("company").filter(
+        invitation_token=uuid_obj,
+        is_accepted=False,
+    ).first()
 
-        )
+    if not staff:
+        already_accepted = Staff.objects.filter(invitation_token=uuid_obj, is_accepted=True).exists()
+        if already_accepted:
+            return Response({"message": "This invitation has already been accepted. Please log in."}, status=400)
+        return Response({"message": "Invalid or expired invitation."}, status=400)
 
-    except Staff.DoesNotExist:
-
-        return Response(
-            {"message": "Invalid invitation."}, status=400)
-
-    user = User.objects.create_user(
-
-        username=staff.email,
-        email=staff.email,
-        password=password,
-        first_name=staff.full_name,
-
+    # If Django User already exists (e.g. prior attempt or linked account), update credentials
+    user = (
+        staff.user
+        or User.objects.filter(email__iexact=staff.email).first()
+        or User.objects.filter(username__iexact=staff.email).first()
     )
+
+    if user:
+        user.username = staff.email
+        user.email = staff.email
+        user.first_name = staff.full_name
+        user.set_password(password)
+        user.is_active = True
+        user.last_login = timezone.now()
+        user.save()
+        user.refresh_from_db()
+    else:
+        user = User.objects.create_user(
+            username=staff.email,
+            email=staff.email,
+            password=password,
+            first_name=staff.full_name,
+            is_active=True,
+        )
+        user.last_login = timezone.now()
+        user.save(update_fields=["last_login"])
+        user.refresh_from_db()
 
     staff.user = user
     staff.is_invited = False
     staff.is_accepted = True
     staff.invitation_token = None
-
-    print("Before save:", staff.is_invited)
-
     staff.save()
-
-    staff.refresh_from_db()
-
-    print("After save:", staff.is_invited)
 
     refresh = RefreshToken.for_user(user)
 
     return Response({
-
         "message": "Account created successfully",
         "access": str(refresh.access_token),
         "refresh": str(refresh),
-
-    })
+        "user": {
+            "id": user.id,
+            "name": staff.full_name or user.first_name,
+            "email": staff.email or user.email,
+            "role": staff.role,
+            "companyId": staff.company.id if staff.company else None,
+            "companyName": staff.company.name if staff.company else "",
+        }
+    }, status=200)
 
 
     
@@ -1644,7 +1721,8 @@ def add_staff(request):
     except Exception as e:
         return HttpResponse(str(e), status=500)
 
-    invite_link = "https://tron-crm.netlify.app/login"
+    frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173").rstrip("/")
+    invite_link = f"{frontend_url}/staff/accept-invitation/?token={staff.invitation_token}"
 
     subject = "You're invited to join CRM"
 
@@ -1676,6 +1754,13 @@ def view_staff(request):
     data = []
 
     for i in staffs:
+        user_obj = i.user
+        if not user_obj and i.email:
+            user_obj = User.objects.filter(email__iexact=i.email).first()
+            if user_obj:
+                i.user = user_obj
+                i.save(update_fields=["user"])
+
         data.append({
             "id": i.id,
             "fullName": i.full_name,
@@ -1684,7 +1769,11 @@ def view_staff(request):
             "department": i.department,
             "status": "Invited" if i.is_invited else "Active",
             "invitedAt": i.invited_at.isoformat() if i.invited_at else None,
-            "lastActive": i.user.last_login.isoformat() if i.user and i.user.last_login else None,
+            "lastActive": (
+                user_obj.last_login.isoformat()
+                if user_obj and user_obj.last_login
+                else None
+            ),
         })
 
     return JsonResponse(data, safe=False)
@@ -1695,17 +1784,28 @@ def view_staff(request):
 def view_single_staff(request, id):
     staff = get_object_or_404(Staff.objects.select_related("company", "user"), id=id, company=request.company)
 
+    user_obj = staff.user
+    if not user_obj and staff.email:
+        user_obj = User.objects.filter(email__iexact=staff.email).first()
+        if user_obj:
+            staff.user = user_obj
+            staff.save(update_fields=["user"])
+
     data = {
-                "c_id":staff.company.name,
-                "id": staff.id,
-                "fullName": staff.full_name,
-                "email": staff.email,
-                "role": staff.role,
-                "department": staff.department,
-                "status": "Invited" if staff.is_invited else "Active",
-                "invitedAt": staff.invited_at.isoformat() if staff.invited_at else None,
-                "lastActive": staff.user.last_login.isoformat() if staff.user and staff.user.last_login else None,
-            }
+        "c_id": staff.company.name if staff.company else "",
+        "id": staff.id,
+        "fullName": staff.full_name,
+        "email": staff.email,
+        "role": staff.role,
+        "department": staff.department,
+        "status": "Invited" if staff.is_invited else "Active",
+        "invitedAt": staff.invited_at.isoformat() if staff.invited_at else None,
+        "lastActive": (
+            user_obj.last_login.isoformat()
+            if user_obj and user_obj.last_login
+            else None
+        ),
+    }
 
     return JsonResponse(data, safe=False)
 

@@ -31,6 +31,9 @@ urlpatterns= [
     path('task/delete/<int:id>/', views.delete_task, name='task-delete'),
 
     path('staff/acceptinvitation/', views.accept_invitation, name='accept-invitation'),
+    path('staff/accept-invitation/', views.accept_invitation, name='accept-invitation-dashed'),
+    path('staff/verify-invitation/', views.verify_invitation, name='verify-invitation'),
+    path('auth/verify-invite/', views.verify_invitation, name='auth-verify-invite'),
     path('staff/add/', views.add_staff, name='staff-add'),
     path('staff/view/', views.view_staff, name='staff-view'),
     path('staff/single/view/<int:id>/', views.view_single_staff, name='view-single-staff'),

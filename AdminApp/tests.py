@@ -438,3 +438,237 @@ class GmailOAuthIntegrationTest(TestCase):
         )
         self.assertEqual(resp_sales.status_code, 403)
 
+
+class StaffInvitationAndLoginFlowTest(TestCase):
+    """
+    Comprehensive tests for the entire staff invitation, verification,
+    acceptance, and login lifecycle.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.company = Company.objects.create(name="Acme Corp", email="contact@acmewidgets.com")
+        self.admin_user = User.objects.create_user(
+            username="admin@acmewidgets.com",
+            email="admin@acmewidgets.com",
+            password="AdminPassword123!",
+        )
+        self.admin_staff = Staff.objects.create(
+            user=self.admin_user,
+            company=self.company,
+            full_name="Admin Boss",
+            email="admin@acmewidgets.com",
+            role="admin",
+            is_accepted=True,
+        )
+        self.admin_token = str(RefreshToken.for_user(self.admin_user).access_token)
+
+    def test_full_invite_verify_accept_login_flow(self):
+        """
+        1. Admin invites a staff member via POST /api/admin/staff/add/
+        2. Invitation token and email link with FRONTEND_URL are generated
+        3. Token is verified via GET /api/admin/staff/verify-invitation/
+        4. Staff accepts invitation via POST /api/admin/staff/acceptinvitation/
+        5. Staff logs in via POST /api/admin/staff/login/
+        """
+        invited_email = "newstaff@acmewidgets.com"
+
+        # 1. Admin sends invitation
+        with patch("AdminApp.views.send_invite_email") as mock_send_email:
+            invite_resp = self.client.post(
+                "/api/admin/staff/add/",
+                data={
+                    "full_name": "New Hire",
+                    "email": invited_email,
+                    "role": "sales agent",
+                    "department": "Sales",
+                },
+                content_type="application/json",
+                HTTP_AUTHORIZATION=f"Bearer {self.admin_token}",
+            )
+            self.assertEqual(invite_resp.status_code, 201)
+            mock_send_email.assert_called_once()
+
+            # Verify email link includes FRONTEND_URL and invitation token
+            call_args = mock_send_email.call_args
+            recipient_email, subject, html_content = call_args[0]
+            self.assertEqual(recipient_email, invited_email)
+            self.assertIn("You're invited to join CRM", subject)
+
+        # 2. Verify staff record in database
+        staff = Staff.objects.get(email=invited_email)
+        self.assertTrue(staff.is_invited)
+        self.assertFalse(staff.is_accepted)
+        self.assertIsNotNone(staff.invitation_token)
+        token_str = str(staff.invitation_token)
+        self.assertIn(token_str, html_content)
+        self.assertIn("http://localhost:5173/staff/accept-invitation/?token=", html_content)
+
+        # 3. Before accepting, staff cannot log in
+        early_login_resp = self.client.post(
+            "/api/admin/staff/login/",
+            data={"email": invited_email, "password": "AnyPassword123!"},
+            content_type="application/json",
+        )
+        self.assertEqual(early_login_resp.status_code, 403)
+        self.assertIn("accept your email invitation", early_login_resp.json().get("message", ""))
+
+        # 4. Verify token endpoint (GET /api/admin/staff/verify-invitation/)
+        verify_resp = self.client.get(f"/api/admin/staff/verify-invitation/?token={token_str}")
+        self.assertEqual(verify_resp.status_code, 200)
+        verify_data = verify_resp.json()
+        self.assertTrue(verify_data["valid"])
+        self.assertEqual(verify_data["email"], invited_email)
+        self.assertEqual(verify_data["fullName"], "New Hire")
+        self.assertEqual(verify_data["role"], "sales agent")
+        self.assertEqual(verify_data["companyName"], "Acme Corp")
+
+        # 4b. Verify token via alias endpoint /api/admin/auth/verify-invite/
+        verify_alias_resp = self.client.get(f"/api/admin/auth/verify-invite/?token={token_str}")
+        self.assertEqual(verify_alias_resp.status_code, 200)
+
+        # 5. Invalid token returns 400/404
+        bad_token_resp = self.client.get("/api/admin/staff/verify-invitation/?token=not-a-uuid")
+        self.assertEqual(bad_token_resp.status_code, 400)
+
+        # 6. Password length validation on accept invitation
+        short_pw_resp = self.client.post(
+            "/api/admin/staff/acceptinvitation/",
+            data={"token": token_str, "password": "short"},
+            content_type="application/json",
+        )
+        self.assertEqual(short_pw_resp.status_code, 400)
+
+        # 7. Successful accept invitation
+        staff_password = "StaffSecurePassword2026!"
+        accept_resp = self.client.post(
+            "/api/admin/staff/acceptinvitation/",
+            data={"token": token_str, "password": staff_password},
+            content_type="application/json",
+        )
+        self.assertEqual(accept_resp.status_code, 200)
+        accept_data = accept_resp.json()
+        self.assertIn("access", accept_data)
+        self.assertIn("refresh", accept_data)
+        self.assertEqual(accept_data["user"]["email"], invited_email)
+        self.assertEqual(accept_data["user"]["role"], "sales agent")
+
+        # Verify database state after acceptance
+        staff.refresh_from_db()
+        self.assertFalse(staff.is_invited)
+        self.assertTrue(staff.is_accepted)
+        self.assertIsNone(staff.invitation_token)
+        self.assertIsNotNone(staff.user)
+        self.assertTrue(staff.user.is_active)
+        self.assertTrue(staff.user.check_password(staff_password))
+
+        # 8. Accepting again fails gracefully
+        repeat_accept_resp = self.client.post(
+            "/api/admin/staff/acceptinvitation/",
+            data={"token": token_str, "password": staff_password},
+            content_type="application/json",
+        )
+        self.assertEqual(repeat_accept_resp.status_code, 400)
+
+        # 9. Staff can now log in via POST /api/admin/staff/login/
+        login_resp = self.client.post(
+            "/api/admin/staff/login/",
+            data={"email": invited_email, "password": staff_password},
+            content_type="application/json",
+        )
+        self.assertEqual(login_resp.status_code, 200)
+        login_data = login_resp.json()
+        self.assertIn("access", login_data)
+        self.assertIn("refresh", login_data)
+        self.assertEqual(login_data["user"]["email"], invited_email)
+        self.assertEqual(login_data["user"]["role"], "sales agent")
+        self.assertEqual(login_data["user"]["companyName"], "Acme Corp")
+
+        # 9b. Verify staff.user.last_login is populated and returned in staff listing
+        staff.user.refresh_from_db()
+        self.assertIsNotNone(staff.user.last_login)
+
+        staff_list_resp = self.client.get(
+            "/api/admin/staff/view/",
+            HTTP_AUTHORIZATION=f"Bearer {self.admin_token}",
+        )
+        self.assertEqual(staff_list_resp.status_code, 200)
+        staff_data = next((s for s in staff_list_resp.json() if s["email"] == invited_email), None)
+        self.assertIsNotNone(staff_data)
+        self.assertEqual(staff_data["lastActive"], staff.user.last_login.isoformat())
+
+        # Also verify single staff view
+        single_staff_resp = self.client.get(
+            f"/api/admin/staff/single/view/{staff.id}/",
+            HTTP_AUTHORIZATION=f"Bearer {self.admin_token}",
+        )
+        self.assertEqual(single_staff_resp.status_code, 200)
+        self.assertEqual(single_staff_resp.json()["lastActive"], staff.user.last_login.isoformat())
+
+        # 10. Wrong password returns 401
+        bad_pw_resp = self.client.post(
+            "/api/admin/staff/login/",
+            data={"email": invited_email, "password": "WrongPassword999!"},
+            content_type="application/json",
+        )
+        self.assertEqual(bad_pw_resp.status_code, 401)
+
+    def test_all_roles_login_updates_last_active_and_staff_listing(self):
+        """
+        Verify that Admin, Manager, Sales Agent, and Support Agent logins all
+        correctly update user.last_login and return lastActive in the Staff APIs.
+        """
+        roles_to_test = [
+            ("admin2@acmewidgets.com", "Admin Two", "admin", "AdminPass2026!"),
+            ("manager@acmewidgets.com", "Manager User", "manager", "ManagerPass2026!"),
+            ("sales@acmewidgets.com", "Sales User", "sales agent", "SalesPass2026!"),
+            ("support@acmewidgets.com", "Support User", "support agent", "SupportPass2026!"),
+        ]
+
+        created_staff = []
+        for email, name, role, password in roles_to_test:
+            user = User.objects.create_user(
+                username=email,
+                email=email,
+                password=password,
+                first_name=name,
+            )
+            # Intentionally start with last_login = None
+            user.last_login = None
+            user.save(update_fields=["last_login"])
+
+            staff = Staff.objects.create(
+                user=user,
+                company=self.company,
+                full_name=name,
+                email=email,
+                role=role,
+                is_accepted=True,
+            )
+            created_staff.append((staff, email, password))
+
+        # Perform login for each role and verify last_login
+        for staff, email, password in created_staff:
+            resp = self.client.post(
+                "/api/admin/staff/login/",
+                data={"email": email, "password": password},
+                content_type="application/json",
+            )
+            self.assertEqual(resp.status_code, 200, f"Login failed for {email}: {resp.content}")
+
+            # Verify staff.user.last_login is updated in DB
+            staff.user.refresh_from_db()
+            self.assertIsNotNone(staff.user.last_login, f"last_login is None for {email}")
+
+            # Verify staff list API contains correct lastActive value
+            list_resp = self.client.get(
+                "/api/admin/staff/view/",
+                HTTP_AUTHORIZATION=f"Bearer {self.admin_token}",
+            )
+            self.assertEqual(list_resp.status_code, 200)
+            item = next((s for s in list_resp.json() if s["email"] == email), None)
+            self.assertIsNotNone(item)
+            self.assertEqual(item["lastActive"], staff.user.last_login.isoformat())
+
+
+
