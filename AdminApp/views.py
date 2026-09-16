@@ -2461,19 +2461,49 @@ def leads_by_source(request):
 @require_permission('picklist.view')
 def view_picklists(request):
     field = request.GET.get("field")
- 
+    module = request.GET.get("module")
+    grouped = request.GET.get("grouped", "").lower() in ("true", "1", "yes") or request.GET.get("group", "").lower() in ("true", "1", "yes")
+
     qs = PicklistOption.objects.filter(
         Q(company=request.company) | Q(company__isnull=True),
         is_active=True,
-    )
- 
+    ).order_by('field', 'order')
+
     if field:
-        qs = qs.filter(field=field)
- 
+        f_clean = field.strip().lower()
+        # 1. Exact match
+        exact_qs = qs.filter(field=f_clean)
+        if exact_qs.exists():
+            qs = exact_qs
+        # 2. Module + field combination (e.g., module=lead & field=status -> lead_status)
+        elif module:
+            mod_field = f"{module.strip().lower()}_{f_clean}"
+            mod_qs = qs.filter(field=mod_field)
+            if mod_qs.exists():
+                qs = mod_qs
+            else:
+                qs = qs.filter(Q(field__icontains=f_clean) | Q(field__endswith=f"_{f_clean}"))
+        # 3. Shorthand alias / suffix match (e.g., status -> lead_status, customer_status, task_status)
+        else:
+            qs = qs.filter(Q(field__icontains=f_clean) | Q(field__endswith=f"_{f_clean}"))
+    elif module:
+        # Filter by module prefix (e.g. module=lead -> lead_status, lead_source, lead_priority)
+        qs = qs.filter(field__startswith=f"{module.strip().lower()}_")
+
     data = [
         {"id": o.id, "field": o.field, "value": o.value, "label": o.label, "order": o.order}
         for o in qs
     ]
+
+    if grouped:
+        grouped_data = {}
+        for opt in data:
+            f_key = opt["field"]
+            if f_key not in grouped_data:
+                grouped_data[f_key] = []
+            grouped_data[f_key].append(opt)
+        return JsonResponse(grouped_data)
+
     return JsonResponse(data, safe=False)
  
  
