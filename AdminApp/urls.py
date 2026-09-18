@@ -180,4 +180,7 @@ urlpatterns= [
     path('email/status/', views.email_status, name='email-status'),
     path('email/disconnect/', views.email_disconnect, name='email-disconnect'),
     path('email/send/', views.email_send_api, name='email-send'),
+
+    # ── Global Audit Trail / Edit History ──────────────────────────────────────
+    path('audit/<str:model_name>/<int:object_id>/', views.view_audit_history, name='audit-history'),
 ]

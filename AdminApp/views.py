@@ -70,7 +70,14 @@ from .models import (
     NotificationPreference,
     TwilioSettings,
 )
-from AdminApp.permissions import require_permission
+from AdminApp.permissions import has_permission, require_permission
+from AdminApp.audit_service import (
+    log_audit,
+    snapshot_instance,
+    calculate_field_changes,
+    get_audit_summary_for_object,
+    MODEL_MAP,
+)
 logger = logging.getLogger(__name__)
 
 # .............. authentication..............
@@ -275,7 +282,7 @@ def user_login(request):
     user.save(update_fields=["last_login"])
     user.refresh_from_db()
 
-    refresh = RefreshToken.for_user(user)
+    refresh = RefreshToken.for_user(user) 
 
     return JsonResponse({
         "access": str(refresh.access_token),
@@ -740,17 +747,74 @@ def add_lead(request):
                 company=request.company
             )
 
-        lead = create_lead_for_company(
-            company=request.company,
-            full_name=full_name,
-            phone_number=phone_number,
-            email=request.data.get("email"),
-            company_name=request.data.get("company_name", ""),
-            lead_source=request.data.get("lead_source", "Website"),
-            assigned_to=assigned_to,
-            priority=request.data.get("priority", "Medium"),
-            lead_description=request.data.get("lead_description"),
-        )
+        # ── Enquiry Type Resolution ──────────────────────────────────────────
+        enquiry_type = request.data.get("enquiry_type", "not_specified")
+        valid_enquiry_types = {"not_specified", "product", "service"}
+        if enquiry_type not in valid_enquiry_types:
+            return HttpResponse(
+                f"Invalid enquiry_type. Must be one of: {', '.join(sorted(valid_enquiry_types))}",
+                status=400,
+            )
+
+        product_obj = None
+        service_obj = None
+
+        if enquiry_type == "product":
+            if request.data.get("service_id"):
+                return HttpResponse(
+                    "service_id must be null when enquiry_type is product.",
+                    status=400,
+                )
+            product_id = request.data.get("product_id")
+            if product_id:
+                try:
+                    product_obj = Product.objects.get(id=product_id, company=request.company)
+                except Product.DoesNotExist:
+                    return HttpResponse(
+                        "Product not found or does not belong to your company.",
+                        status=400,
+                    )
+
+        elif enquiry_type == "service":
+            if request.data.get("product_id"):
+                return HttpResponse(
+                    "product_id must be null when enquiry_type is service.",
+                    status=400,
+                )
+            service_id = request.data.get("service_id")
+            if service_id:
+                try:
+                    service_obj = Service.objects.get(id=service_id, company=request.company)
+                except Service.DoesNotExist:
+                    return HttpResponse(
+                        "Service not found or does not belong to your company.",
+                        status=400,
+                    )
+
+        elif enquiry_type == "not_specified":
+            # Reject if caller accidentally sends product_id/service_id
+            if request.data.get("product_id") or request.data.get("service_id"):
+                return HttpResponse(
+                    "product_id and service_id must be null when enquiry_type is not_specified.",
+                    status=400,
+                )
+
+        with transaction.atomic():
+            lead = create_lead_for_company(
+                company=request.company,
+                full_name=full_name,
+                phone_number=phone_number,
+                email=request.data.get("email"),
+                company_name=request.data.get("company_name", ""),
+                lead_source=request.data.get("lead_source", "Website"),
+                assigned_to=assigned_to,
+                priority=request.data.get("priority", "Medium"),
+                lead_description=request.data.get("lead_description"),
+                enquiry_type=enquiry_type,
+                product=product_obj,
+                service=service_obj,
+            )
+            log_audit(request, lead, "created")
 
         return HttpResponse(
             "Lead created successfully",
@@ -772,10 +836,18 @@ def add_lead(request):
 
 
 
+
 @api_view(['GET'])
 @require_permission('lead.view')
 def view_leads(request):
-    leads = Lead.objects.filter(company=request.company).order_by('-updated_at')
+    leads = (
+        Lead.objects
+        .filter(company=request.company)
+        .exclude(status="converted")
+        .select_related("assigned_to")
+        .order_by('-updated_at')
+    )
+
     list = []
 
     for i in leads:
@@ -795,33 +867,56 @@ def view_leads(request):
                 "description": i.lead_description,
                 "dateAdded": i.created_at.strftime("%b %d, %Y") if i.created_at else "—",
                 "createdAt": i.created_at.isoformat() if i.created_at else None,
+                "enquiry_type": i.enquiry_type,
+                "enquiryType": i.enquiry_type,
             }
         )
-    return JsonResponse(list, safe=False)
 
+    return JsonResponse(list, safe=False)
 
 
 @api_view(['GET'])
 @require_permission('lead.view')
 def view_single_lead(request, id):
-    lead = get_object_or_404(Lead, id=id, company=request.company)
-    
+    lead = get_object_or_404(
+        Lead.objects.select_related("assigned_to", "product", "service"),
+        id=id,
+        company=request.company,
+    )
+
     data = {
-                "id": lead.id,
-                "name": lead.full_name,
-                "phone": lead.phone_number,
-                "email": lead.email,
-                "companyName": lead.company_name,
-                "source": lead.lead_source,
-                "assignedTo": lead.assigned_to.full_name if lead.assigned_to else "—",
-                "assignedToId": lead.assigned_to.id if lead.assigned_to else None, 
-                "status": lead.get_status_display(),
-                "priority": lead.priority,
-                "description": lead.lead_description,
-                "dateAdded": lead.created_at.strftime("%b %d, %Y") if lead.created_at else "—",
-                "createdAt": lead.created_at.isoformat() if lead.created_at else None,
-            }
-    
+        "id": lead.id,
+        "name": lead.full_name,
+        "phone": lead.phone_number,
+        "email": lead.email,
+        "companyName": lead.company_name,
+        "source": lead.lead_source,
+        "assignedTo": lead.assigned_to.full_name if lead.assigned_to else "—",
+        "assignedToId": lead.assigned_to.id if lead.assigned_to else None,
+        "status": lead.get_status_display(),
+        "priority": lead.priority,
+        "description": lead.lead_description,
+        "dateAdded": lead.created_at.strftime("%b %d, %Y") if lead.created_at else "—",
+        "createdAt": lead.created_at.isoformat() if lead.created_at else None,
+        # ── Enquiry Type ────────────────────────────────────────────────────
+        "enquiry_type": lead.enquiry_type,
+        "product": (
+            {"id": lead.product.id, "name": lead.product.name}
+            if lead.product_id
+            else None
+        ),
+        "service": (
+            {"id": lead.service.id, "name": lead.service.service_name}
+            if lead.service_id
+            else None
+        ),
+    }
+
+    audit_info = get_audit_summary_for_object(request.company, lead)
+    data["lastEditedBy"] = audit_info["lastEditedBy"]
+    data["lastEditedAt"] = audit_info["lastEditedAt"]
+    data["editHistory"] = audit_info["editHistory"]
+
     return JsonResponse(data, safe=False)
     
 
@@ -835,8 +930,83 @@ def update_lead(request, id):
     except Lead.DoesNotExist:
         return HttpResponse("Lead not found", status=404)
 
-    previous_staff_id = lead.assigned_to_id
+    # ── Phase 1: Validate enquiry inputs EARLY (fail-fast before any mutation) ─
+    # We resolve Product/Service objects here so we return errors immediately,
+    # but we do NOT mutate lead fields yet — snapshot must come first.
+    pending_enquiry = None
 
+    has_enquiry_input = (
+        "enquiry_type" in request.data
+        or "product_id" in request.data
+        or "service_id" in request.data
+    )
+
+    if has_enquiry_input:
+        enquiry_type = request.data.get("enquiry_type") or lead.enquiry_type
+        valid_enquiry_types = {"not_specified", "product", "service"}
+        if enquiry_type not in valid_enquiry_types:
+            return HttpResponse(
+                f"Invalid enquiry_type. Must be one of: {', '.join(sorted(valid_enquiry_types))}",
+                status=400,
+            )
+
+        if enquiry_type == "product":
+            if request.data.get("service_id"):
+                return HttpResponse(
+                    "service_id must be null when enquiry_type is product.",
+                    status=400,
+                )
+            product_obj = None
+            if "product_id" in request.data:
+                product_id = request.data.get("product_id")
+                if product_id:
+                    try:
+                        product_obj = Product.objects.get(id=product_id, company=request.company)
+                    except Product.DoesNotExist:
+                        return HttpResponse(
+                            "Product not found or does not belong to your company.",
+                            status=400,
+                        )
+            else:
+                product_obj = lead.product if lead.enquiry_type == "product" else None
+
+            pending_enquiry = {"enquiry_type": "product", "product": product_obj, "service": None}
+
+        elif enquiry_type == "service":
+            if request.data.get("product_id"):
+                return HttpResponse(
+                    "product_id must be null when enquiry_type is service.",
+                    status=400,
+                )
+            service_obj = None
+            if "service_id" in request.data:
+                service_id = request.data.get("service_id")
+                if service_id:
+                    try:
+                        service_obj = Service.objects.get(id=service_id, company=request.company)
+                    except Service.DoesNotExist:
+                        return HttpResponse(
+                            "Service not found or does not belong to your company.",
+                            status=400,
+                        )
+            else:
+                service_obj = lead.service if lead.enquiry_type == "service" else None
+
+            pending_enquiry = {"enquiry_type": "service", "product": None, "service": service_obj}
+
+        elif enquiry_type == "not_specified":
+            if request.data.get("product_id") or request.data.get("service_id"):
+                return HttpResponse(
+                    "product_id and service_id must be null when enquiry_type is not_specified.",
+                    status=400,
+                )
+            pending_enquiry = {"enquiry_type": "not_specified", "product": None, "service": None}
+
+    # ── Phase 2: Snapshot BEFORE any mutation (captures the pre-change state) ─
+    previous_staff_id = lead.assigned_to_id
+    old_snapshot = snapshot_instance(lead)
+
+    # ── Phase 3: Apply all field mutations ────────────────────────────────────
     lead.full_name = request.data.get("full_name") or lead.full_name
     lead.phone_number = request.data.get("phone_number") or lead.phone_number
     lead.email = request.data.get("email") or lead.email
@@ -847,6 +1017,12 @@ def update_lead(request, id):
     lead.expected_closing_date = request.data.get("expected_closing_date") or None
     lead.lead_description = request.data.get("lead_description") or lead.lead_description
 
+    # Apply enquiry fields now (after snapshot)
+    if pending_enquiry is not None:
+        lead.enquiry_type = pending_enquiry["enquiry_type"]
+        lead.product = pending_enquiry["product"]
+        lead.service = pending_enquiry["service"]
+
     assigned_to_id = request.data.get("assigned_to")
     if assigned_to_id:
         try:
@@ -856,8 +1032,12 @@ def update_lead(request, id):
     else:
         lead.assigned_to = None
 
+
     try:
-        lead.save()
+        with transaction.atomic():
+            lead.save()
+            changes = calculate_field_changes(old_snapshot, lead)
+            log_audit(request, lead, "updated", changes=changes)
 
         if lead.assigned_to and lead.assigned_to_id != previous_staff_id:
             try:
@@ -889,6 +1069,8 @@ def update_lead(request, id):
 @require_permission('lead.delete')
 def delete_lead(request, id):
     data = Lead.objects.get(id=id, company=request.company)
+    object_repr = str(data)
+    log_audit(request, data, "deleted", object_repr=object_repr)
     data.delete()
     return JsonResponse({"message": "successfully deleted"})
 
@@ -1042,6 +1224,7 @@ def add_deal(request):
             customer=customer,
             account=account,
         )
+        log_audit(request, deal, "created")
 
         if deal.assigned_to:
             try:
@@ -1105,8 +1288,14 @@ def view_single_deals(request, id):
         company=request.company
     )
 
+    data = serialize_deal(deal)
+    audit_info = get_audit_summary_for_object(request.company, deal)
+    data["lastEditedBy"] = audit_info["lastEditedBy"]
+    data["lastEditedAt"] = audit_info["lastEditedAt"]
+    data["editHistory"] = audit_info["editHistory"]
+
     return JsonResponse(
-        serialize_deal(deal),
+        data,
         safe=False
     )
 
@@ -1123,6 +1312,7 @@ def update_deal(request, id):
         return HttpResponse("Deal not found", status=404)
 
     previous_staff_id = deal.assigned_to_id
+    old_snapshot = snapshot_instance(deal)
 
     deal.deal_name = request.data.get("deal_name") or deal.deal_name
     deal.company_name = request.data.get("company_name") or deal.company_name
@@ -1187,6 +1377,8 @@ def update_deal(request, id):
 
     try:
         deal.save()
+        changes = calculate_field_changes(old_snapshot, deal)
+        log_audit(request, deal, "updated", changes=changes)
 
         if (
             deal.assigned_to
@@ -1232,6 +1424,8 @@ def delete_deal(request, id):
         id=id,
         company=request.company
     )
+    object_repr = str(deal)
+    log_audit(request, deal, "deleted", object_repr=object_repr)
 
     deal.delete()
 
@@ -1290,6 +1484,7 @@ def add_customer(request):
             status=status,
             lifetime_value=lifetime_value,
         )
+        log_audit(request, customer, "created")
 
         if deal:
             deal.stage = "Won"
@@ -1339,17 +1534,22 @@ def view_single_customer(request, id):
     customer = get_object_or_404(Customer, id=id, company=request.company)
 
     data = {
-                "id": customer.id,
-                "companyName": customer.company_name,
-                "contactName": customer.contact_name,
-                "phone": customer.phone_number,
-                "email": customer.email,
-                "industry": customer.industry,
-                "status": customer.get_status_display(),
-                "lifetimeValue": float(customer.lifetime_value) if customer.lifetime_value else 0,
-                "joinDate": customer.created_at.strftime("%Y-%m-%d") if customer.created_at else "—",
-                "createdAt": customer.created_at.isoformat() if customer.created_at else None,
-            }
+        "id": customer.id,
+        "companyName": customer.company_name,
+        "contactName": customer.contact_name,
+        "phone": customer.phone_number,
+        "email": customer.email,
+        "industry": customer.industry,
+        "status": customer.get_status_display(),
+        "lifetimeValue": float(customer.lifetime_value) if customer.lifetime_value else 0,
+        "joinDate": customer.created_at.strftime("%Y-%m-%d") if customer.created_at else "—",
+        "createdAt": customer.created_at.isoformat() if customer.created_at else None,
+    }
+
+    audit_info = get_audit_summary_for_object(request.company, customer)
+    data["lastEditedBy"] = audit_info["lastEditedBy"]
+    data["lastEditedAt"] = audit_info["lastEditedAt"]
+    data["editHistory"] = audit_info["editHistory"]
 
     return JsonResponse(data, safe=False)
 
@@ -1362,6 +1562,8 @@ def update_customer(request, id):
     except Customer.DoesNotExist:
         return HttpResponse("Customer not found", status=404)
 
+    old_snapshot = snapshot_instance(customer)
+
     customer.company_name = request.data.get("company_name") or customer.company_name
     customer.contact_name = request.data.get("contact_name") or customer.contact_name
     customer.phone_number = request.data.get("phone_number") or customer.phone_number
@@ -1372,6 +1574,8 @@ def update_customer(request, id):
 
     try:
         customer.save()
+        changes = calculate_field_changes(old_snapshot, customer)
+        log_audit(request, customer, "updated", changes=changes)
         return HttpResponse("Customer updated successfully", status=200)
 
     except Exception as e:
@@ -1382,6 +1586,8 @@ def update_customer(request, id):
 @require_permission('customer.delete')
 def delete_customer(request, id):
     customer = Customer.objects.get(id=id, company=request.company)
+    object_repr = str(customer)
+    log_audit(request, customer, "deleted", object_repr=object_repr)
     customer.delete()
     return JsonResponse({"message": "Customer deleted successfully"})
 
@@ -1475,6 +1681,7 @@ def add_task(request):
                 status=status,
                 due_date=due_date,
             )
+            log_audit(request, task, "created")
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
 
@@ -1580,6 +1787,11 @@ def view_single_task(request, id):
         "createdAt": task.created_at.isoformat() if task.created_at else None,
     }
 
+    audit_info = get_audit_summary_for_object(request.company, task)
+    data["lastEditedBy"] = audit_info["lastEditedBy"]
+    data["lastEditedAt"] = audit_info["lastEditedAt"]
+    data["editHistory"] = audit_info["editHistory"]
+
     return JsonResponse(data, safe=False)
 
 
@@ -1590,6 +1802,8 @@ def update_task(request, id):
         task = Task.objects.get(id=id, company=request.company)
     except Task.DoesNotExist:
         return HttpResponse("Task not found", status=404)
+
+    old_snapshot = snapshot_instance(task)
 
     if "title" in request.data:
         task.title = request.data.get("title")
@@ -1647,6 +1861,8 @@ def update_task(request, id):
 
     try:
         task.save()
+        changes = calculate_field_changes(old_snapshot, task)
+        log_audit(request, task, "updated", changes=changes)
 
         if task.assigned_to and task.assigned_to_id != previous_staff_id:
             try:
@@ -1680,6 +1896,8 @@ def delete_task(request, id):
     except Task.DoesNotExist:
         return HttpResponse("Task not found", status=404)
 
+    object_repr = str(task)
+    log_audit(request, task, "deleted", object_repr=object_repr)
     task.delete()
     return JsonResponse({"message": "Task deleted successfully"})
 
@@ -2347,12 +2565,14 @@ def convert_lead(request, lead_id):
                     email=lead.email,
                     industry="",
                 )
+                log_audit(request, customer, "created")
 
             deal = Deal.objects.create(
                 customer=customer,
                 account=None,
                 **deal_kwargs,
             )
+            log_audit(request, deal, "created")
 
         elif related_type == "account":
 
@@ -2361,12 +2581,14 @@ def convert_lead(request, lead_id):
                     company=request.company,
                     **build_account_fields(),
                 )
+                log_audit(request, account, "created")
 
             deal = Deal.objects.create(
                 customer=None,
                 account=account,
                 **deal_kwargs,
             )
+            log_audit(request, deal, "created")
 
     # ----------------------------
     # UPDATE LEAD
@@ -2375,6 +2597,17 @@ def convert_lead(request, lead_id):
     lead.status = "converted"
     lead.converted_at = timezone.now()
     lead.save()
+    log_audit(
+        request,
+        lead,
+        "converted",
+        changes={
+            "status": {"old": "new", "new": "converted"},
+            "customer_id": customer.id if customer else None,
+            "account_id": account.id if account else None,
+            "deal_id": deal.id if deal else None,
+        }
+    )
 
     return JsonResponse({
         "message": "Lead converted successfully",
@@ -2615,7 +2848,7 @@ def add_account(request):
                 zip_code=shipping_data.get("zip_code", ""),
             )
 
-        Accounts.objects.create(
+        account = Accounts.objects.create(
             company=request.company,
             account_name=account_name,
             assigned_to_id=assigned_to_id,
@@ -2630,6 +2863,7 @@ def add_account(request):
             billing_address=billing_address,
             shipping_address=shipping_address,
         )
+        log_audit(request, account, "created")
         return HttpResponse("Account created successfully", status=201)
 
     except Exception as e:
@@ -2732,6 +2966,11 @@ def view_single_account(request, id):
         "updated_at": account.updated_at.isoformat(),
     }
 
+    audit_info = get_audit_summary_for_object(request.company, account)
+    data["lastEditedBy"] = audit_info["lastEditedBy"]
+    data["lastEditedAt"] = audit_info["lastEditedAt"]
+    data["editHistory"] = audit_info["editHistory"]
+
     return JsonResponse(data, safe=False)
 
 
@@ -2742,6 +2981,8 @@ def update_account(request, id):
         account = Accounts.objects.get(id=id, company=request.company)
     except Accounts.DoesNotExist:
         return HttpResponse("Account not found", status=404)
+
+    old_snapshot = snapshot_instance(account)
 
     try:
         account.account_name = request.data.get("acc_name") or account.account_name
@@ -2804,6 +3045,8 @@ def update_account(request, id):
                 account.shipping_address = shipping_address
 
         account.save()
+        changes = calculate_field_changes(old_snapshot, account)
+        log_audit(request, account, "updated", changes=changes)
         return HttpResponse("Account updated successfully", status=200)
 
     except Exception as e:
@@ -2816,6 +3059,8 @@ def update_account(request, id):
 @require_permission('account.delete')
 def delete_account(request, id):
     account = Accounts.objects.get(id=id, company=request.company)
+    object_repr = str(account)
+    log_audit(request, account, "deleted", object_repr=object_repr)
     account.delete()
     return JsonResponse({"message": "Account deleted successfully"})
 
@@ -2987,6 +3232,8 @@ def add_quote(request):
                     total=total,
                 )
 
+            log_audit(request, quote, "created")
+
         return HttpResponse(
             "Quote created successfully",
             status=201,
@@ -3080,6 +3327,11 @@ def view_single_quote(request, id):
         "products": _serialize_products(quote),
     }
 
+    audit_info = get_audit_summary_for_object(request.company, quote)
+    data["lastEditedBy"] = audit_info["lastEditedBy"]
+    data["lastEditedAt"] = audit_info["lastEditedAt"]
+    data["editHistory"] = audit_info["editHistory"]
+
     return JsonResponse(data)
 
 @api_view(['PUT'])
@@ -3091,6 +3343,8 @@ def update_quote(request, id):
         id=id,
         company=request.company
     )
+
+    old_snapshot = snapshot_instance(quote)
 
     try:
         with transaction.atomic():
@@ -3202,6 +3456,9 @@ def update_quote(request, id):
                         total=total,
                     )
 
+            changes = calculate_field_changes(old_snapshot, quote)
+            log_audit(request, quote, "updated", changes=changes)
+
         return HttpResponse(
             "Quote updated successfully",
             status=200
@@ -3217,7 +3474,8 @@ def update_quote(request, id):
 def delete_quote(request, id):
     try:
         quote = Quotes.objects.get(id=id, company=request.company)
-
+        object_repr = str(quote)
+        log_audit(request, quote, "deleted", object_repr=object_repr)
         quote.delete()
 
         return Response(
@@ -3409,6 +3667,8 @@ def add_meeting(request):
                     status="invited",
                 )
 
+            log_audit(request, meeting, "created")
+
         if meeting.host and meeting.host.user:
             try:
                 notify_user(
@@ -3587,6 +3847,11 @@ def view_single_meeting(request, id):
         "updatedAt": meeting.updated_at.isoformat(),
     }
 
+    audit_info = get_audit_summary_for_object(request.company, meeting)
+    data["lastEditedBy"] = audit_info["lastEditedBy"]
+    data["lastEditedAt"] = audit_info["lastEditedAt"]
+    data["editHistory"] = audit_info["editHistory"]
+
     return JsonResponse(data)
 
 
@@ -3752,6 +4017,7 @@ def update_meeting(request, id):
         )
 
     previous_host_id = meeting.host_id
+    old_snapshot = snapshot_instance(meeting)
 
     try:
 
@@ -4070,6 +4336,9 @@ def update_meeting(request, id):
                     meeting.id
                 )
 
+        changes = calculate_field_changes(old_snapshot, meeting)
+        log_audit(request, meeting, "updated", changes=changes)
+
         return HttpResponse(
             "Meeting updated successfully",
             status=200
@@ -4092,6 +4361,8 @@ def update_meeting(request, id):
 def delete_meeting(request, id):
     try:
         meeting = Meeting.objects.get(id=id, company=request.company)
+        object_repr = str(meeting)
+        log_audit(request, meeting, "deleted", object_repr=object_repr)
         meeting.delete()
         return JsonResponse({"message": "Meeting deleted successfully"})
     except Meeting.DoesNotExist:
@@ -4378,6 +4649,7 @@ def add_call(request):
             deal_id=related_deal_id if related_type == "deal" else None,
             account_id=related_account_id if related_type == "account" else None,
         )
+        log_audit(request, call, "created")
 
         if call.assigned_to:
             related_label = get_related_label(related_type, call.lead, call.contact, call.deal, call.account)
@@ -4465,6 +4737,11 @@ def view_single_call(request, id):
         "createdAt": call.created_at.isoformat(),
     }
 
+    audit_info = get_audit_summary_for_object(request.company, call)
+    data["lastEditedBy"] = audit_info["lastEditedBy"]
+    data["lastEditedAt"] = audit_info["lastEditedAt"]
+    data["editHistory"] = audit_info["editHistory"]
+
     return JsonResponse(data, safe=False)
 
 
@@ -4477,6 +4754,7 @@ def update_call(request, id):
         return HttpResponse("Call not found", status=404)
 
     previous_staff_id = call.assigned_to_id
+    old_snapshot = snapshot_instance(call)
 
     try:
         call.subject = request.data.get("subject") or call.subject
@@ -4514,6 +4792,8 @@ def update_call(request, id):
                 call.account_id = request.data.get("related_account") or None
 
         call.save()
+        changes = calculate_field_changes(old_snapshot, call)
+        log_audit(request, call, "updated", changes=changes)
 
         if call.assigned_to and call.assigned_to_id != previous_staff_id:
             related_type_resolved = "lead" if call.lead else "contact" if call.contact else "deal" if call.deal else "account" if call.account else "none"
@@ -4549,6 +4829,8 @@ def update_call(request, id):
 def delete_call(request, id):
     try:
         call = Call.objects.get(id=id, company=request.company)
+        object_repr = str(call)
+        log_audit(request, call, "deleted", object_repr=object_repr)
         call.delete()
         return JsonResponse({"message": "Call deleted successfully"})
     except Call.DoesNotExist:
@@ -4592,7 +4874,7 @@ def add_vendor(request):
     try:
         address = _create_address(address_data) if address_data else None
 
-        Vendor.objects.create(
+        vendor = Vendor.objects.create(
             company=request.company,
             vendor_name=vendor_name,
             vendor_code=vendor_code,
@@ -4606,6 +4888,7 @@ def add_vendor(request):
             notes=notes,
             address=address,
         )
+        log_audit(request, vendor, "created")
         return HttpResponse("Vendor created successfully", status=201)
 
     except Exception as e:
@@ -4666,6 +4949,11 @@ def view_single_vendor(request, id):
         "updatedAt": vendor.updated_at.isoformat(),
     }
 
+    audit_info = get_audit_summary_for_object(request.company, vendor)
+    data["lastEditedBy"] = audit_info["lastEditedBy"]
+    data["lastEditedAt"] = audit_info["lastEditedAt"]
+    data["editHistory"] = audit_info["editHistory"]
+
     return JsonResponse(data, safe=False)
 
 
@@ -4676,6 +4964,8 @@ def update_vendor(request, id):
         vendor = Vendor.objects.select_related("address").get(id=id, company=request.company)
     except Vendor.DoesNotExist:
         return HttpResponse("Vendor not found", status=404)
+
+    old_snapshot = snapshot_instance(vendor)
 
     try:
         vendor.vendor_name = request.data.get("vendor_name") or vendor.vendor_name
@@ -4710,6 +5000,8 @@ def update_vendor(request, id):
                 vendor.address = _create_address(address_data)
 
         vendor.save()
+        changes = calculate_field_changes(old_snapshot, vendor)
+        log_audit(request, vendor, "updated", changes=changes)
         return HttpResponse("Vendor updated successfully", status=200)
 
     except Exception as e:
@@ -4722,6 +5014,8 @@ def update_vendor(request, id):
 def delete_vendor(request, id):
     try:
         vendor = Vendor.objects.get(id=id, company=request.company)
+        object_repr = str(vendor)
+        log_audit(request, vendor, "deleted", object_repr=object_repr)
         vendor.delete()
         return JsonResponse({"message": "Vendor deleted successfully"})
     except Vendor.DoesNotExist:
@@ -4760,7 +5054,7 @@ def add_product(request):
         return HttpResponse("SKU already exists", status=400)
 
     try:
-        Product.objects.create(
+        product = Product.objects.create(
             company=request.company,
             name=name,
             product_code=product_code,
@@ -4778,6 +5072,7 @@ def add_product(request):
             description=description,
             status=status,
         )
+        log_audit(request, product, "created")
         return HttpResponse("Product created successfully", status=201)
 
     except Exception as e:
@@ -4848,6 +5143,11 @@ def view_single_product(request, id):
         "updatedAt": product.updated_at.isoformat(),
     }
 
+    audit_info = get_audit_summary_for_object(request.company, product)
+    data["lastEditedBy"] = audit_info["lastEditedBy"]
+    data["lastEditedAt"] = audit_info["lastEditedAt"]
+    data["editHistory"] = audit_info["editHistory"]
+
     return JsonResponse(data, safe=False)
 
 
@@ -4858,6 +5158,8 @@ def update_product(request, id):
         product = Product.objects.get(id=id, company=request.company)
     except Product.DoesNotExist:
         return HttpResponse("Product not found", status=404)
+
+    old_snapshot = snapshot_instance(product)
 
     try:
         product.name = request.data.get("name") or product.name
@@ -4894,6 +5196,8 @@ def update_product(request, id):
             product.sku = new_sku
 
         product.save()
+        changes = calculate_field_changes(old_snapshot, product)
+        log_audit(request, product, "updated", changes=changes)
         return HttpResponse("Product updated successfully", status=200)
 
     except Exception as e:
@@ -4906,6 +5210,8 @@ def update_product(request, id):
 def delete_product(request, id):
     try:
         product = Product.objects.get(id=id, company=request.company)
+        object_repr = str(product)
+        log_audit(request, product, "deleted", object_repr=object_repr)
         product.delete()
         return JsonResponse({"message": "Product deleted successfully"})
     except Product.DoesNotExist:
@@ -5290,53 +5596,56 @@ def add_sales_order(request):
         if quote and not deal_id:
             deal_id = quote.deal_id
 
-        sales_order = SalesOrder.objects.create(
-            company=request.company,
-            subject=subject,
-            customer_id=customer_id,
-            owner_id=owner_id or None,
-            quote_id=quote_id or None,
-            deal_id=deal_id or None,
-            purchase_order_number=purchase_order_number,
-            carrier=carrier,
-            sales_commission=sales_commission,
-            due_date=due_date or None,
-            status=status,
-            excise_duty=excise_duty,
-            billing_address=billing_address,
-            shipping_address=shipping_address,
-            terms_and_conditions=terms_and_conditions,
-            description=description,
-        )
-
-        if not items_data and quote:
-            items_data = [
-                {
-                    "product_id": qi.product_id,
-                    "quantity": qi.quantity,
-                    "list_price": qi.list_price,
-                    "discount": qi.discount,
-                    "tax": qi.tax,
-                    "description": qi.description,
-                }
-                for qi in quote.items.all()
-            ]
-
-        for item in items_data:
-            quantity = int(item.get("quantity", 1))
-            list_price = float(item.get("list_price", 0))
-            discount = float(item.get("discount", 0))
-            tax = float(item.get("tax", 0))
-
-            SalesOrderItem.objects.create(
-                sales_order=sales_order,
-                product_id=item.get("product_id"),
-                quantity=quantity,
-                list_price=list_price,
-                discount=discount,
-                tax=tax,
-                description=item.get("description", ""),
+        with transaction.atomic():
+            sales_order = SalesOrder.objects.create(
+                company=request.company,
+                subject=subject,
+                customer_id=customer_id,
+                owner_id=owner_id or None,
+                quote_id=quote_id or None,
+                deal_id=deal_id or None,
+                purchase_order_number=purchase_order_number,
+                carrier=carrier,
+                sales_commission=sales_commission,
+                due_date=due_date or None,
+                status=status,
+                excise_duty=excise_duty,
+                billing_address=billing_address,
+                shipping_address=shipping_address,
+                terms_and_conditions=terms_and_conditions,
+                description=description,
             )
+
+            if not items_data and quote:
+                items_data = [
+                    {
+                        "product_id": qi.product_id,
+                        "quantity": qi.quantity,
+                        "list_price": qi.list_price,
+                        "discount": qi.discount,
+                        "tax": qi.tax,
+                        "description": qi.description,
+                    }
+                    for qi in quote.items.all()
+                ]
+
+            for item in items_data:
+                quantity = int(item.get("quantity", 1))
+                list_price = float(item.get("list_price", 0))
+                discount = float(item.get("discount", 0))
+                tax = float(item.get("tax", 0))
+
+                SalesOrderItem.objects.create(
+                    sales_order=sales_order,
+                    product_id=item.get("product_id"),
+                    quantity=quantity,
+                    list_price=list_price,
+                    discount=discount,
+                    tax=tax,
+                    description=item.get("description", ""),
+                )
+
+            log_audit(request, sales_order, "created")
 
         if sales_order.owner and sales_order.owner.user:
             try:
@@ -5470,6 +5779,7 @@ def view_single_sales_order(request, id):
         ],
         "createdAt": order.created_at.isoformat(),
         "updatedAt": order.updated_at.isoformat(),
+        **get_audit_summary_for_object(request.company, order),
     }
 
     return JsonResponse(data, safe=False)
@@ -5484,6 +5794,7 @@ def update_sales_order(request, id):
         return HttpResponse("Sales order not found", status=404)
 
     previous_owner_id = order.owner_id
+    old_snapshot = snapshot_instance(order)
 
     try:
         with transaction.atomic():
@@ -5543,6 +5854,9 @@ def update_sales_order(request, id):
                         description=item.get("description", ""),
                     )
 
+            changes = calculate_field_changes(old_snapshot, order)
+            log_audit(request, order, "updated", changes=changes)
+
         if order.owner and order.owner_id != previous_owner_id and order.owner.user:
             try:
                 notify_user(
@@ -5574,7 +5888,10 @@ def update_sales_order(request, id):
 def delete_sales_order(request, id):
     try:
         order = SalesOrder.objects.get(id=id, company=request.company)
-        order.delete()
+        object_repr = str(order)
+        with transaction.atomic():
+            log_audit(request, order, "deleted", object_repr=object_repr)
+            order.delete()
         return JsonResponse({"message": "Sales order deleted successfully"})
     except SalesOrder.DoesNotExist:
         return HttpResponse("Sales order not found", status=404)
@@ -5689,31 +6006,34 @@ def add_invoice(request):
             billing_address = _create_address(billing_data)
             shipping_address = _create_address(shipping_data)
 
-        invoice = Invoice.objects.create(
-            company=request.company,
-            subject=subject,
-            customer_id=customer_id,
-            owner_id=owner_id or None,
-            sales_order_id=sales_order_id or None,
-            invoice_date=invoice_date,
-            due_date=due_date or None,
-            purchase_order_number=purchase_order_number,
-            status=status,
-            billing_address=billing_address,
-            shipping_address=shipping_address,
-            terms_and_conditions=terms_and_conditions,
-            description=description,
-        )
-
-        for item in items_data:
-            InvoiceItem.objects.create(
-                invoice=invoice,
-                product_id=item.get("product_id"),
-                quantity=int(item.get("quantity", 1)),
-                list_price=float(item.get("list_price", 0)),
-                discount=float(item.get("discount", 0)),
-                tax=float(item.get("tax", 0)),
+        with transaction.atomic():
+            invoice = Invoice.objects.create(
+                company=request.company,
+                subject=subject,
+                customer_id=customer_id,
+                owner_id=owner_id or None,
+                sales_order_id=sales_order_id or None,
+                invoice_date=invoice_date,
+                due_date=due_date or None,
+                purchase_order_number=purchase_order_number,
+                status=status,
+                billing_address=billing_address,
+                shipping_address=shipping_address,
+                terms_and_conditions=terms_and_conditions,
+                description=description,
             )
+
+            for item in items_data:
+                InvoiceItem.objects.create(
+                    invoice=invoice,
+                    product_id=item.get("product_id"),
+                    quantity=int(item.get("quantity", 1)),
+                    list_price=float(item.get("list_price", 0)),
+                    discount=float(item.get("discount", 0)),
+                    tax=float(item.get("tax", 0)),
+                )
+
+            log_audit(request, invoice, "created")
 
         if invoice.owner and invoice.owner.user:
             try:
@@ -5838,6 +6158,7 @@ def view_single_invoice(request, id):
         ],
         "createdAt": invoice.created_at.isoformat(),
         "updatedAt": invoice.updated_at.isoformat(),
+        **get_audit_summary_for_object(request.company, invoice),
     }
 
     return JsonResponse(data, safe=False)
@@ -5852,54 +6173,59 @@ def update_invoice(request, id):
         return HttpResponse("Invoice not found", status=404)
 
     previous_owner_id = invoice.owner_id
+    old_snapshot = snapshot_instance(invoice)
 
     try:
-        invoice.subject = request.data.get("subject") or invoice.subject
-        invoice.status = request.data.get("status", invoice.status)
-        invoice.purchase_order_number = request.data.get("purchase_order_number", invoice.purchase_order_number)
-        invoice.terms_and_conditions = request.data.get("terms_and_conditions", invoice.terms_and_conditions)
-        invoice.description = request.data.get("description", invoice.description)
+        with transaction.atomic():
+            invoice.subject = request.data.get("subject") or invoice.subject
+            invoice.status = request.data.get("status", invoice.status)
+            invoice.purchase_order_number = request.data.get("purchase_order_number", invoice.purchase_order_number)
+            invoice.terms_and_conditions = request.data.get("terms_and_conditions", invoice.terms_and_conditions)
+            invoice.description = request.data.get("description", invoice.description)
 
-        invoice_date = request.data.get("invoice_date")
-        if invoice_date:
-            invoice.invoice_date = invoice_date
+            invoice_date = request.data.get("invoice_date")
+            if invoice_date:
+                invoice.invoice_date = invoice_date
 
-        due_date = request.data.get("due_date")
-        if due_date:
-            invoice.due_date = due_date
+            due_date = request.data.get("due_date")
+            if due_date:
+                invoice.due_date = due_date
 
-        owner_id = request.data.get("owner_id")
-        if owner_id:
-            invoice.owner_id = owner_id
+            owner_id = request.data.get("owner_id")
+            if owner_id:
+                invoice.owner_id = owner_id
 
-        customer_id = request.data.get("customer_id")
-        if customer_id:
-            invoice.customer_id = customer_id
+            customer_id = request.data.get("customer_id")
+            if customer_id:
+                invoice.customer_id = customer_id
 
-        sales_order_id = request.data.get("sales_order_id")
-        if sales_order_id:
-            invoice.sales_order_id = sales_order_id
+            sales_order_id = request.data.get("sales_order_id")
+            if sales_order_id:
+                invoice.sales_order_id = sales_order_id
 
-        billing_data = request.data.get("billing_add")
-        invoice.billing_address = _update_address(invoice.billing_address, billing_data)
+            billing_data = request.data.get("billing_add")
+            invoice.billing_address = _update_address(invoice.billing_address, billing_data)
 
-        shipping_data = request.data.get("shipping_add")
-        invoice.shipping_address = _update_address(invoice.shipping_address, shipping_data)
+            shipping_data = request.data.get("shipping_add")
+            invoice.shipping_address = _update_address(invoice.shipping_address, shipping_data)
 
-        invoice.save()
+            invoice.save()
 
-        items_data = request.data.get("items")
-        if items_data is not None:
-            invoice.items.all().delete()
-            for item in items_data:
-                InvoiceItem.objects.create(
-                    invoice=invoice,
-                    product_id=item.get("product_id"),
-                    quantity=int(item.get("quantity", 1)),
-                    list_price=float(item.get("list_price", 0)),
-                    discount=float(item.get("discount", 0)),
-                    tax=float(item.get("tax", 0)),
-                )
+            items_data = request.data.get("items")
+            if items_data is not None:
+                invoice.items.all().delete()
+                for item in items_data:
+                    InvoiceItem.objects.create(
+                        invoice=invoice,
+                        product_id=item.get("product_id"),
+                        quantity=int(item.get("quantity", 1)),
+                        list_price=float(item.get("list_price", 0)),
+                        discount=float(item.get("discount", 0)),
+                        tax=float(item.get("tax", 0)),
+                    )
+
+            changes = calculate_field_changes(old_snapshot, invoice)
+            log_audit(request, invoice, "updated", changes=changes)
 
         if invoice.owner and invoice.owner_id != previous_owner_id and invoice.owner.user:
             try:
@@ -5931,7 +6257,10 @@ def update_invoice(request, id):
 def delete_invoice(request, id):
     try:
         invoice = Invoice.objects.get(id=id, company=request.company)
-        invoice.delete()
+        object_repr = str(invoice)
+        with transaction.atomic():
+            log_audit(request, invoice, "deleted", object_repr=object_repr)
+            invoice.delete()
         return JsonResponse({"message": "Invoice deleted successfully"})
     except Invoice.DoesNotExist:
         return HttpResponse("Invoice not found", status=404)
@@ -6054,30 +6383,33 @@ def add_purchase_order(request):
         if shipping_data:
             shipping_address = _create_address(shipping_data)
 
-        purchase_order = PurchaseOrder.objects.create(
-            company=request.company,
-            subject=subject,
-            vendor_id=vendor_id,
-            owner_id=owner_id or None,
-            purchase_date=purchase_date,
-            expected_delivery_date=expected_delivery_date or None,
-            status=status,
-            billing_address=billing_address,
-            shipping_address=shipping_address,
-            terms_and_conditions=terms_and_conditions,
-            description=description,
-        )
-
-        for item in items_data:
-            PurchaseOrderItem.objects.create(
-                purchase_order=purchase_order,
-                product_id=item.get("product_id"),
-                quantity=int(item.get("quantity", 1)),
-                list_price=float(item.get("list_price", 0)),
-                discount=float(item.get("discount", 0)),
-                tax=float(item.get("tax", 0)),
-                description=item.get("description", ""),
+        with transaction.atomic():
+            purchase_order = PurchaseOrder.objects.create(
+                company=request.company,
+                subject=subject,
+                vendor_id=vendor_id,
+                owner_id=owner_id or None,
+                purchase_date=purchase_date,
+                expected_delivery_date=expected_delivery_date or None,
+                status=status,
+                billing_address=billing_address,
+                shipping_address=shipping_address,
+                terms_and_conditions=terms_and_conditions,
+                description=description,
             )
+
+            for item in items_data:
+                PurchaseOrderItem.objects.create(
+                    purchase_order=purchase_order,
+                    product_id=item.get("product_id"),
+                    quantity=int(item.get("quantity", 1)),
+                    list_price=float(item.get("list_price", 0)),
+                    discount=float(item.get("discount", 0)),
+                    tax=float(item.get("tax", 0)),
+                    description=item.get("description", ""),
+                )
+
+            log_audit(request, purchase_order, "created")
 
         return HttpResponse("Purchase order created successfully", status=201)
 
@@ -6178,6 +6510,7 @@ def view_single_purchase_order(request, id):
         ],
         "createdAt": order.created_at.isoformat(),
         "updatedAt": order.updated_at.isoformat(),
+        **get_audit_summary_for_object(request.company, order),
     }
 
     return JsonResponse(data, safe=False)
@@ -6192,50 +6525,55 @@ def update_purchase_order(request, id):
         return HttpResponse("Purchase order not found", status=404)
 
     previous_owner_id = order.owner_id
+    old_snapshot = snapshot_instance(order)
 
     try:
-        order.subject = request.data.get("subject") or order.subject
-        order.status = request.data.get("status", order.status)
-        order.terms_and_conditions = request.data.get("terms_and_conditions", order.terms_and_conditions)
-        order.description = request.data.get("description", order.description)
+        with transaction.atomic():
+            order.subject = request.data.get("subject") or order.subject
+            order.status = request.data.get("status", order.status)
+            order.terms_and_conditions = request.data.get("terms_and_conditions", order.terms_and_conditions)
+            order.description = request.data.get("description", order.description)
 
-        purchase_date = request.data.get("purchase_date")
-        if purchase_date:
-            order.purchase_date = purchase_date
+            purchase_date = request.data.get("purchase_date")
+            if purchase_date:
+                order.purchase_date = purchase_date
 
-        expected_delivery_date = request.data.get("expected_delivery_date")
-        if expected_delivery_date:
-            order.expected_delivery_date = expected_delivery_date
+            expected_delivery_date = request.data.get("expected_delivery_date")
+            if expected_delivery_date:
+                order.expected_delivery_date = expected_delivery_date
 
-        owner_id = request.data.get("owner_id")
-        if owner_id:
-            order.owner_id = owner_id
+            owner_id = request.data.get("owner_id")
+            if owner_id:
+                order.owner_id = owner_id
 
-        vendor_id = request.data.get("vendor_id")
-        if vendor_id:
-            order.vendor_id = vendor_id
+            vendor_id = request.data.get("vendor_id")
+            if vendor_id:
+                order.vendor_id = vendor_id
 
-        billing_data = request.data.get("billing_add")
-        order.billing_address = _update_address(order.billing_address, billing_data)
+            billing_data = request.data.get("billing_add")
+            order.billing_address = _update_address(order.billing_address, billing_data)
 
-        shipping_data = request.data.get("shipping_add")
-        order.shipping_address = _update_address(order.shipping_address, shipping_data)
+            shipping_data = request.data.get("shipping_add")
+            order.shipping_address = _update_address(order.shipping_address, shipping_data)
 
-        order.save()
+            order.save()
 
-        items_data = request.data.get("items")
-        if items_data is not None:
-            order.items.all().delete()
-            for item in items_data:
-                PurchaseOrderItem.objects.create(
-                    purchase_order=order,
-                    product_id=item.get("product_id"),
-                    quantity=int(item.get("quantity", 1)),
-                    list_price=float(item.get("list_price", 0)),
-                    discount=float(item.get("discount", 0)),
-                    tax=float(item.get("tax", 0)),
-                    description=item.get("description", ""),
-                )
+            items_data = request.data.get("items")
+            if items_data is not None:
+                order.items.all().delete()
+                for item in items_data:
+                    PurchaseOrderItem.objects.create(
+                        purchase_order=order,
+                        product_id=item.get("product_id"),
+                        quantity=int(item.get("quantity", 1)),
+                        list_price=float(item.get("list_price", 0)),
+                        discount=float(item.get("discount", 0)),
+                        tax=float(item.get("tax", 0)),
+                        description=item.get("description", ""),
+                    )
+
+            changes = calculate_field_changes(old_snapshot, order)
+            log_audit(request, order, "updated", changes=changes)
 
         if order.owner and order.owner_id != previous_owner_id and order.owner.user:
             try:
@@ -6268,7 +6606,10 @@ def update_purchase_order(request, id):
 def delete_purchase_order(request, id):
     try:
         order = PurchaseOrder.objects.get(id=id, company=request.company)
-        order.delete()
+        object_repr = str(order)
+        with transaction.atomic():
+            log_audit(request, order, "deleted", object_repr=object_repr)
+            order.delete()
         return JsonResponse({"message": "Purchase order deleted successfully"})
     except PurchaseOrder.DoesNotExist:
         return HttpResponse("Purchase order not found", status=404)
@@ -6625,18 +6966,20 @@ def add_service(request):
         return HttpResponse("Service code already exists", status=400)
 
     try:
-        Service.objects.create(
-            company=request.company,
-            service_name=service_name,
-            service_code=service_code,
-            category=request.data.get("category", ""),
-            description=request.data.get("description", ""),
-            unit_price=unit_price,
-            tax_percentage=request.data.get("tax_percentage") or 0,
-            billing_type=request.data.get("billing_type", "fixed"),
-            duration=request.data.get("duration", ""),
-            status=request.data.get("status", "active"),
-        )
+        with transaction.atomic():
+            service = Service.objects.create(
+                company=request.company,
+                service_name=service_name,
+                service_code=service_code,
+                category=request.data.get("category", ""),
+                description=request.data.get("description", ""),
+                unit_price=unit_price,
+                tax_percentage=request.data.get("tax_percentage") or 0,
+                billing_type=request.data.get("billing_type", "fixed"),
+                duration=request.data.get("duration", ""),
+                status=request.data.get("status", "active"),
+            )
+            log_audit(request, service, "created")
         return HttpResponse("Service created successfully", status=201)
 
     except Exception as e:
@@ -6689,6 +7032,7 @@ def view_single_service(request, id):
         "status": service.status,
         "createdAt": service.created_at.isoformat(),
         "updatedAt": service.updated_at.isoformat(),
+        **get_audit_summary_for_object(request.company, service),
     })
 
 
@@ -6700,23 +7044,28 @@ def update_service(request, id):
     except Service.DoesNotExist:
         return HttpResponse("Service not found", status=404)
 
+    old_snapshot = snapshot_instance(service)
+
     try:
-        service.service_name = request.data.get("service_name") or service.service_name
-        service.category = request.data.get("category", service.category)
-        service.description = request.data.get("description", service.description)
-        service.unit_price = request.data.get("unit_price") or service.unit_price
-        service.tax_percentage = request.data.get("tax_percentage") or service.tax_percentage
-        service.billing_type = request.data.get("billing_type", service.billing_type)
-        service.duration = request.data.get("duration", service.duration)
-        service.status = request.data.get("status", service.status)
+        with transaction.atomic():
+            service.service_name = request.data.get("service_name") or service.service_name
+            service.category = request.data.get("category", service.category)
+            service.description = request.data.get("description", service.description)
+            service.unit_price = request.data.get("unit_price") or service.unit_price
+            service.tax_percentage = request.data.get("tax_percentage") or service.tax_percentage
+            service.billing_type = request.data.get("billing_type", service.billing_type)
+            service.duration = request.data.get("duration", service.duration)
+            service.status = request.data.get("status", service.status)
 
-        new_code = request.data.get("service_code")
-        if new_code and new_code != service.service_code:
-            if Service.objects.filter(service_code=new_code, company=request.company).exists():
-                return HttpResponse("Service code already exists", status=400)
-            service.service_code = new_code
+            new_code = request.data.get("service_code")
+            if new_code and new_code != service.service_code:
+                if Service.objects.filter(service_code=new_code, company=request.company).exists():
+                    return HttpResponse("Service code already exists", status=400)
+                service.service_code = new_code
 
-        service.save()
+            service.save()
+            changes = calculate_field_changes(old_snapshot, service)
+            log_audit(request, service, "updated", changes=changes)
         return HttpResponse("Service updated successfully", status=200)
 
     except Exception as e:
@@ -6729,7 +7078,10 @@ def update_service(request, id):
 def delete_service(request, id):
     try:
         service = Service.objects.get(id=id, company=request.company)
-        service.delete()
+        object_repr = str(service)
+        with transaction.atomic():
+            log_audit(request, service, "deleted", object_repr=object_repr)
+            service.delete()
         return JsonResponse({"message": "Service deleted successfully"})
     except Service.DoesNotExist:
         return HttpResponse("Service not found", status=404)
@@ -7652,4 +8004,49 @@ def email_send_api(request):
     if result["success"]:
         return Response({"message": "Email sent successfully.", "message_id": result["message_id"]})
     else:
-        return Response({"error": result["error"]}, status=400)
+        return Response({"error": result["error"]}, status=400)
+
+
+# ── Global Audit Trail / Edit History Endpoint ─────────────────────────────────
+@api_view(['GET'])
+def view_audit_history(request, model_name, object_id):
+    """
+    Generic endpoint to retrieve edit history & summary for any model instance.
+    URL: /api/admin/audit/<model_name>/<object_id>/
+    """
+    model_name_clean = model_name.lower().replace("-", "").replace("_", "")
+    model_class = None
+    for k, v in MODEL_MAP.items():
+        if k.replace("-", "").replace("_", "") == model_name_clean:
+            model_class = v
+            break
+
+    if not model_class:
+        return JsonResponse({"detail": f"Model '{model_name}' not found."}, status=404)
+
+    # Permission check: e.g. "lead.view", "customer.view", "deal.view", etc.
+    perm_name = f"{model_class._meta.model_name}.view"
+    staff = getattr(request, "staff", None)
+    if not staff:
+        user = getattr(request, "user", None)
+        if user and hasattr(user, "staff"):
+            staff = user.staff
+
+    if not has_permission(staff, perm_name):
+        return Response(
+            {"detail": "You do not have permission to view audit history for this module."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    # Multi-tenant isolation: Verify company ownership
+    if hasattr(model_class, "company"):
+        exists = model_class.objects.filter(id=object_id, company=request.company).exists()
+        if not exists:
+            from django.contrib.contenttypes.models import ContentType
+            from AdminApp.models import AuditLog
+            ct = ContentType.objects.get_for_model(model_class)
+            if not AuditLog.objects.filter(company=request.company, content_type=ct, object_id=object_id).exists():
+                return JsonResponse({"detail": "Record not found."}, status=404)
+
+    summary = get_audit_summary_for_object(request.company, model_class, object_id=object_id)
+    return JsonResponse(summary, safe=False)

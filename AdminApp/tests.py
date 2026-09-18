@@ -8,13 +8,23 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from AdminApp.models import Company, Staff, EmailIntegration
+from AdminApp.models import Company, Staff, EmailIntegration, Product, Service, Lead, AuditLog
 from AdminApp.permissions import (
     ROLE_PERMISSIONS,
     has_permission,
     require_permission,
 )
-from AdminApp.views import view_leads, delete_lead, add_staff, delete_staff, view_cases, view_quotes
+from AdminApp.views import (
+    view_leads,
+    delete_lead,
+    add_staff,
+    delete_staff,
+    view_cases,
+    view_quotes,
+    add_lead,
+    view_single_lead,
+    update_lead,
+)
 
 
 class MockStaff:
@@ -669,6 +679,507 @@ class StaffInvitationAndLoginFlowTest(TestCase):
             item = next((s for s in list_resp.json() if s["email"] == email), None)
             self.assertIsNotNone(item)
             self.assertEqual(item["lastActive"], staff.user.last_login.isoformat())
+
+
+class LeadEnquiryTypeTests(TestCase):
+    """
+    Comprehensive tests for the Lead Enquiry Type feature covering:
+    - Case 1: Not Specified (product=null, service=null)
+    - Case 2: Product (product=valid company product, service=null)
+    - Case 3: Product optional (product=null, service=null)
+    - Case 4: Service (service=valid company service, product=null)
+    - Case 5: Service optional (service=null, product=null)
+    - Case 6: Cross-company product assignment rejected
+    - Case 7: Cross-company service assignment rejected
+    - Case 8: Setting both product and service rejected
+    - Case 9: Update Not Specified -> Product with audit history
+    - Case 10: Update Product -> Service with product cleared and audit history
+    - Case 11: Update Service -> Not Specified with both cleared and audit history
+    - view_single_lead API structure
+    - view_leads API lightweight structure
+    """
+
+    def setUp(self):
+        from django.core.exceptions import ValidationError
+
+        self.ValidationError = ValidationError
+
+        # Two distinct companies for multi-tenant testing
+        self.company_a = Company.objects.create(name="Tenant Alpha", email="alpha@tenant.com")
+        self.company_b = Company.objects.create(name="Tenant Beta", email="beta@tenant.com")
+
+        # Admin user and staff for Company A
+        self.user_a = User.objects.create_user(
+            username="admin_alpha",
+            email="admin@alpha.com",
+            password="StrongPassword2026!",
+        )
+        self.staff_a = Staff.objects.create(
+            user=self.user_a,
+            company=self.company_a,
+            full_name="Alpha Admin",
+            email="admin@alpha.com",
+            role="admin",
+            is_accepted=True,
+        )
+        self.token_a = str(RefreshToken.for_user(self.user_a).access_token)
+        self.auth_headers_a = {"HTTP_AUTHORIZATION": f"Bearer {self.token_a}"}
+
+        # Admin user and staff for Company B
+        self.user_b = User.objects.create_user(
+            username="admin_beta",
+            email="admin@beta.com",
+            password="StrongPassword2026!",
+        )
+        self.staff_b = Staff.objects.create(
+            user=self.user_b,
+            company=self.company_b,
+            full_name="Beta Admin",
+            email="admin@beta.com",
+            role="admin",
+            is_accepted=True,
+        )
+
+        # Products & Services for Company A
+        self.product_a = Product.objects.create(
+            company=self.company_a,
+            name="CRM Software",
+            product_code="PRD-CRM",
+            sku="SKU-CRM-01",
+            unit_price=100.00,
+        )
+        self.service_a = Service.objects.create(
+            company=self.company_a,
+            service_name="Website Development",
+            service_code="SRV-DEV",
+            unit_price=50.00,
+            billing_type="fixed",
+        )
+
+        # Products & Services for Company B (Foreign tenant)
+        self.product_b = Product.objects.create(
+            company=self.company_b,
+            name="Competitor Product",
+            product_code="PRD-BETA",
+            sku="SKU-BETA-01",
+            unit_price=200.00,
+        )
+        self.service_b = Service.objects.create(
+            company=self.company_b,
+            service_name="Competitor Service",
+            service_code="SRV-BETA",
+            unit_price=90.00,
+            billing_type="hourly",
+        )
+
+    # ── Case 1 ──────────────────────────────────────────────────────────────
+    def test_case_1_not_specified(self):
+        """Case 1: Not Specified, Product = null, Service = null must work."""
+        resp = self.client.post(
+            "/api/admin/lead/add/",
+            data={
+                "full_name": "Alice Case 1",
+                "phone_number": "1111111111",
+                "enquiry_type": "not_specified",
+            },
+            content_type="application/json",
+            **self.auth_headers_a,
+        )
+        self.assertEqual(resp.status_code, 201)
+
+        lead = Lead.objects.get(full_name="Alice Case 1", company=self.company_a)
+        self.assertEqual(lead.enquiry_type, "not_specified")
+        self.assertIsNone(lead.product)
+        self.assertIsNone(lead.service)
+
+    # ── Case 2 ──────────────────────────────────────────────────────────────
+    def test_case_2_product_with_valid_product(self):
+        """Case 2: Product, Product = valid company product, Service = null must work."""
+        resp = self.client.post(
+            "/api/admin/lead/add/",
+            data={
+                "full_name": "Bob Case 2",
+                "phone_number": "2222222222",
+                "enquiry_type": "product",
+                "product_id": self.product_a.id,
+            },
+            content_type="application/json",
+            **self.auth_headers_a,
+        )
+        self.assertEqual(resp.status_code, 201)
+
+        lead = Lead.objects.get(full_name="Bob Case 2", company=self.company_a)
+        self.assertEqual(lead.enquiry_type, "product")
+        self.assertEqual(lead.product, self.product_a)
+        self.assertIsNone(lead.service)
+
+    # ── Case 3 ──────────────────────────────────────────────────────────────
+    def test_case_3_product_optional(self):
+        """Case 3: Product, Product = null, Service = null must work (Product selection is optional)."""
+        resp = self.client.post(
+            "/api/admin/lead/add/",
+            data={
+                "full_name": "Charlie Case 3",
+                "phone_number": "3333333333",
+                "enquiry_type": "product",
+            },
+            content_type="application/json",
+            **self.auth_headers_a,
+        )
+        self.assertEqual(resp.status_code, 201)
+
+        lead = Lead.objects.get(full_name="Charlie Case 3", company=self.company_a)
+        self.assertEqual(lead.enquiry_type, "product")
+        self.assertIsNone(lead.product)
+        self.assertIsNone(lead.service)
+
+    # ── Case 4 ──────────────────────────────────────────────────────────────
+    def test_case_4_service_with_valid_service(self):
+        """Case 4: Service, Service = valid company service, Product = null must work."""
+        resp = self.client.post(
+            "/api/admin/lead/add/",
+            data={
+                "full_name": "Dana Case 4",
+                "phone_number": "4444444444",
+                "enquiry_type": "service",
+                "service_id": self.service_a.id,
+            },
+            content_type="application/json",
+            **self.auth_headers_a,
+        )
+        self.assertEqual(resp.status_code, 201)
+
+        lead = Lead.objects.get(full_name="Dana Case 4", company=self.company_a)
+        self.assertEqual(lead.enquiry_type, "service")
+        self.assertEqual(lead.service, self.service_a)
+        self.assertIsNone(lead.product)
+
+    # ── Case 5 ──────────────────────────────────────────────────────────────
+    def test_case_5_service_optional(self):
+        """Case 5: Service, Service = null, Product = null must work (Service selection is optional)."""
+        resp = self.client.post(
+            "/api/admin/lead/add/",
+            data={
+                "full_name": "Evan Case 5",
+                "phone_number": "5555555555",
+                "enquiry_type": "service",
+            },
+            content_type="application/json",
+            **self.auth_headers_a,
+        )
+        self.assertEqual(resp.status_code, 201)
+
+        lead = Lead.objects.get(full_name="Evan Case 5", company=self.company_a)
+        self.assertEqual(lead.enquiry_type, "service")
+        self.assertIsNone(lead.service)
+        self.assertIsNone(lead.product)
+
+    # ── Case 6 ──────────────────────────────────────────────────────────────
+    def test_case_6_cross_company_product_rejected(self):
+        """Case 6: Try assigning a Product from another Company. Must be rejected."""
+        # API level rejection
+        resp = self.client.post(
+            "/api/admin/lead/add/",
+            data={
+                "full_name": "Fiona Case 6",
+                "phone_number": "6666666666",
+                "enquiry_type": "product",
+                "product_id": self.product_b.id,
+            },
+            content_type="application/json",
+            **self.auth_headers_a,
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(Lead.objects.filter(full_name="Fiona Case 6").exists())
+
+        # Model validation level rejection
+        with self.assertRaises(self.ValidationError):
+            lead = Lead(
+                company=self.company_a,
+                full_name="Fiona Model Test",
+                phone_number="6666666666",
+                enquiry_type="product",
+                product=self.product_b,
+            )
+            lead.clean()
+
+    # ── Case 7 ──────────────────────────────────────────────────────────────
+    def test_case_7_cross_company_service_rejected(self):
+        """Case 7: Try assigning a Service from another Company. Must be rejected."""
+        # API level rejection
+        resp = self.client.post(
+            "/api/admin/lead/add/",
+            data={
+                "full_name": "George Case 7",
+                "phone_number": "7777777777",
+                "enquiry_type": "service",
+                "service_id": self.service_b.id,
+            },
+            content_type="application/json",
+            **self.auth_headers_a,
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(Lead.objects.filter(full_name="George Case 7").exists())
+
+        # Model validation level rejection
+        with self.assertRaises(self.ValidationError):
+            lead = Lead(
+                company=self.company_a,
+                full_name="George Model Test",
+                phone_number="7777777777",
+                enquiry_type="service",
+                service=self.service_b,
+            )
+            lead.clean()
+
+    # ── Case 8 ──────────────────────────────────────────────────────────────
+    def test_case_8_both_product_and_service_rejected(self):
+        """Case 8: Try setting both Product and Service. Must be rejected."""
+        # When enquiry_type is product but service_id also sent
+        resp1 = self.client.post(
+            "/api/admin/lead/add/",
+            data={
+                "full_name": "Hannah Case 8a",
+                "phone_number": "8888888881",
+                "enquiry_type": "product",
+                "product_id": self.product_a.id,
+                "service_id": self.service_a.id,
+            },
+            content_type="application/json",
+            **self.auth_headers_a,
+        )
+        self.assertEqual(resp1.status_code, 400)
+
+        # When enquiry_type is service but product_id also sent
+        resp2 = self.client.post(
+            "/api/admin/lead/add/",
+            data={
+                "full_name": "Hannah Case 8b",
+                "phone_number": "8888888882",
+                "enquiry_type": "service",
+                "product_id": self.product_a.id,
+                "service_id": self.service_a.id,
+            },
+            content_type="application/json",
+            **self.auth_headers_a,
+        )
+        self.assertEqual(resp2.status_code, 400)
+
+        # When enquiry_type is not_specified but product/service sent
+        resp3 = self.client.post(
+            "/api/admin/lead/add/",
+            data={
+                "full_name": "Hannah Case 8c",
+                "phone_number": "8888888883",
+                "enquiry_type": "not_specified",
+                "product_id": self.product_a.id,
+            },
+            content_type="application/json",
+            **self.auth_headers_a,
+        )
+        self.assertEqual(resp3.status_code, 400)
+
+        # Model validation level rejection
+        with self.assertRaises(self.ValidationError):
+            lead = Lead(
+                company=self.company_a,
+                full_name="Hannah Model Test",
+                phone_number="8888888884",
+                enquiry_type="product",
+                product=self.product_a,
+                service=self.service_a,
+            )
+            lead.clean()
+
+    # ── Case 9 ──────────────────────────────────────────────────────────────
+    def test_case_9_update_not_specified_to_product_audit(self):
+        """Case 9: Change Not Specified → Product. Verify audit history."""
+        lead = Lead.objects.create(
+            company=self.company_a,
+            full_name="Ian Case 9",
+            phone_number="9999999999",
+            enquiry_type="not_specified",
+        )
+
+        resp = self.client.put(
+            f"/api/admin/lead/update/{lead.id}/",
+            data={
+                "enquiry_type": "product",
+                "product_id": self.product_a.id,
+            },
+            content_type="application/json",
+            **self.auth_headers_a,
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        lead.refresh_from_db()
+        self.assertEqual(lead.enquiry_type, "product")
+        self.assertEqual(lead.product, self.product_a)
+        self.assertIsNone(lead.service)
+
+        # Verify audit record
+        audit = AuditLog.objects.filter(
+            company=self.company_a,
+            object_id=lead.id,
+            action="updated",
+        ).order_by("-created_at").first()
+        self.assertIsNotNone(audit)
+        self.assertIn("enquiry_type", audit.changes)
+        self.assertEqual(audit.changes["enquiry_type"], {"old": "not_specified", "new": "product"})
+        self.assertIn("product", audit.changes)
+        self.assertEqual(audit.changes["product"], {"old": None, "new": self.product_a.id})
+
+    # ── Case 10 ─────────────────────────────────────────────────────────────
+    def test_case_10_update_product_to_service_audit(self):
+        """Case 10: Change Product → Service. Verify Product cleared and audit records changes."""
+        lead = Lead.objects.create(
+            company=self.company_a,
+            full_name="Julia Case 10",
+            phone_number="1010101010",
+            enquiry_type="product",
+            product=self.product_a,
+        )
+
+        resp = self.client.put(
+            f"/api/admin/lead/update/{lead.id}/",
+            data={
+                "enquiry_type": "service",
+                "service_id": self.service_a.id,
+            },
+            content_type="application/json",
+            **self.auth_headers_a,
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        lead.refresh_from_db()
+        self.assertEqual(lead.enquiry_type, "service")
+        self.assertIsNone(lead.product)  # Product automatically cleared
+        self.assertEqual(lead.service, self.service_a)
+
+        # Verify audit changes
+        audit = AuditLog.objects.filter(
+            company=self.company_a,
+            object_id=lead.id,
+            action="updated",
+        ).order_by("-created_at").first()
+        self.assertIsNotNone(audit)
+        self.assertEqual(audit.changes["enquiry_type"], {"old": "product", "new": "service"})
+        self.assertEqual(audit.changes["product"], {"old": self.product_a.id, "new": None})
+        self.assertEqual(audit.changes["service"], {"old": None, "new": self.service_a.id})
+
+    # ── Case 11 ─────────────────────────────────────────────────────────────
+    def test_case_11_update_service_to_not_specified_audit(self):
+        """Case 11: Change Service → Not Specified. Verify both Product and Service cleared."""
+        lead = Lead.objects.create(
+            company=self.company_a,
+            full_name="Kevin Case 11",
+            phone_number="1111111111",
+            enquiry_type="service",
+            service=self.service_a,
+        )
+
+        resp = self.client.put(
+            f"/api/admin/lead/update/{lead.id}/",
+            data={
+                "enquiry_type": "not_specified",
+            },
+            content_type="application/json",
+            **self.auth_headers_a,
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        lead.refresh_from_db()
+        self.assertEqual(lead.enquiry_type, "not_specified")
+        self.assertIsNone(lead.product)
+        self.assertIsNone(lead.service)  # Service automatically cleared
+
+        # Verify audit changes
+        audit = AuditLog.objects.filter(
+            company=self.company_a,
+            object_id=lead.id,
+            action="updated",
+        ).order_by("-created_at").first()
+        self.assertIsNotNone(audit)
+        self.assertEqual(audit.changes["enquiry_type"], {"old": "service", "new": "not_specified"})
+        self.assertEqual(audit.changes["service"], {"old": self.service_a.id, "new": None})
+
+    # ── View APIs ───────────────────────────────────────────────────────────
+    def test_view_single_lead_payload_structure(self):
+        """Test view_single_lead returns expected JSON structure for product, service, and not_specified."""
+        # 1. Product Lead
+        lead_prod = Lead.objects.create(
+            company=self.company_a,
+            full_name="Single Lead Prod",
+            phone_number="123",
+            enquiry_type="product",
+            product=self.product_a,
+        )
+        resp_prod = self.client.get(
+            f"/api/admin/lead/single/view/{lead_prod.id}/",
+            **self.auth_headers_a,
+        )
+        self.assertEqual(resp_prod.status_code, 200)
+        data_prod = resp_prod.json()
+        self.assertEqual(data_prod["enquiry_type"], "product")
+        self.assertEqual(data_prod["product"], {"id": self.product_a.id, "name": "CRM Software"})
+        self.assertIsNone(data_prod["service"])
+
+        # 2. Service Lead
+        lead_serv = Lead.objects.create(
+            company=self.company_a,
+            full_name="Single Lead Serv",
+            phone_number="456",
+            enquiry_type="service",
+            service=self.service_a,
+        )
+        resp_serv = self.client.get(
+            f"/api/admin/lead/single/view/{lead_serv.id}/",
+            **self.auth_headers_a,
+        )
+        self.assertEqual(resp_serv.status_code, 200)
+        data_serv = resp_serv.json()
+        self.assertEqual(data_serv["enquiry_type"], "service")
+        self.assertIsNone(data_serv["product"])
+        self.assertEqual(data_serv["service"], {"id": self.service_a.id, "name": "Website Development"})
+
+        # 3. Not Specified Lead
+        lead_ns = Lead.objects.create(
+            company=self.company_a,
+            full_name="Single Lead NS",
+            phone_number="789",
+            enquiry_type="not_specified",
+        )
+        resp_ns = self.client.get(
+            f"/api/admin/lead/single/view/{lead_ns.id}/",
+            **self.auth_headers_a,
+        )
+        self.assertEqual(resp_ns.status_code, 200)
+        data_ns = resp_ns.json()
+        self.assertEqual(data_ns["enquiry_type"], "not_specified")
+        self.assertIsNone(data_ns["product"])
+        self.assertIsNone(data_ns["service"])
+
+    def test_view_leads_lightweight_includes_enquiry_type(self):
+        """Test view_leads includes enquiry_type without nested product/service objects."""
+        Lead.objects.create(
+            company=self.company_a,
+            full_name="List Lead",
+            phone_number="999",
+            enquiry_type="product",
+            product=self.product_a,
+        )
+        resp = self.client.get(
+            "/api/admin/lead/view/",
+            **self.auth_headers_a,
+        )
+        self.assertEqual(resp.status_code, 200)
+        leads = resp.json()
+        item = next((l for l in leads if l["name"] == "List Lead"), None)
+        self.assertIsNotNone(item)
+        self.assertEqual(item["enquiry_type"], "product")
+        # Ensure no heavy nested product or service dicts are returned
+        self.assertNotIn("product", item)
+        self.assertNotIn("service", item)
 
 
 

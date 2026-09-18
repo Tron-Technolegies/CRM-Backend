@@ -4,6 +4,8 @@ import uuid
 
 from django.db import models
 from django.contrib.auth.models import User
+from django.contrib.contenttypes.models import ContentType
+from django.contrib.contenttypes.fields import GenericForeignKey
 from django.conf import settings as django_settings
 from cloudinary.models import CloudinaryField
 
@@ -99,15 +101,99 @@ class Lead(models.Model):
     expected_closing_date = models.DateField(null=True, blank=True)
 
     meta_lead_id = models.CharField(max_length=255, blank=True, null=True, unique=True)
-    
+
+    # ── Enquiry Type ────────────────────────────────────────────────────────────
+    ENQUIRY_TYPE_CHOICES = [
+        ("not_specified", "Not Specified"),
+        ("product", "Product"),
+        ("service", "Service"),
+    ]
+
+    enquiry_type = models.CharField(
+        max_length=20,
+        choices=ENQUIRY_TYPE_CHOICES,
+        default="not_specified",
+    )
+
+    # Nullable FKs — SET_NULL so deleting a Product/Service never cascades leads.
+    # Company-ownership validation is enforced explicitly in the API views
+    # (where request.company is available), NOT here in clean().
+    product = models.ForeignKey(
+        "Product",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="lead_enquiries",
+    )
+    service = models.ForeignKey(
+        "Service",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="lead_enquiries",
+    )
+
     # converted_customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name="originating_leads")
     converted_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    def clean(self):
+        """
+        Enforce field-level consistency rules for enquiry_type / product / service,
+        including multi-tenant company isolation.
+        """
+        from django.core.exceptions import ValidationError
+
+        valid_choices = [c[0] for c in self.ENQUIRY_TYPE_CHOICES]
+        if self.enquiry_type not in valid_choices:
+            raise ValidationError(
+                {"enquiry_type": f"Invalid enquiry_type. Must be one of: {', '.join(valid_choices)}"}
+            )
+
+        et = self.enquiry_type or "not_specified"
+
+        if et == "not_specified":
+            if self.product_id is not None:
+                raise ValidationError(
+                    {"product": "product must be null when enquiry_type is not_specified."}
+                )
+            if self.service_id is not None:
+                raise ValidationError(
+                    {"service": "service must be null when enquiry_type is not_specified."}
+                )
+
+        elif et == "product":
+            if self.service_id is not None:
+                raise ValidationError(
+                    {"service": "service must be null when enquiry_type is product."}
+                )
+
+        elif et == "service":
+            if self.product_id is not None:
+                raise ValidationError(
+                    {"product": "product must be null when enquiry_type is service."}
+                )
+
+        # Multi-tenant isolation: Product/Service must belong to the same company
+        if self.company_id:
+            if self.product_id and self.product and self.product.company_id != self.company_id:
+                raise ValidationError(
+                    {"product": "Selected product does not belong to the same company as the lead."}
+                )
+            if self.service_id and self.service and self.service.company_id != self.company_id:
+                raise ValidationError(
+                    {"service": "Selected service does not belong to the same company as the lead."}
+                )
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return self.full_name
-    
+
+
 
 
 class Customer(models.Model):
@@ -1262,4 +1348,37 @@ class EmailIntegration(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.company.name} - Gmail ({self.email or 'not connected'})"
+        return f"{self.company.name} - Gmail ({self.email or 'not connected'})"
+
+
+class AuditLog(models.Model):
+    ACTION_CHOICES = [
+        ("created", "Created"),
+        ("updated", "Updated"),
+        ("deleted", "Deleted"),
+        ("converted", "Converted"),
+    ]
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="audit_logs")
+    staff = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="audit_logs")
+    action = models.CharField(max_length=20, choices=ACTION_CHOICES)
+
+    content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
+    object_id = models.PositiveIntegerField()
+    content_object = GenericForeignKey("content_type", "object_id")
+
+    object_repr = models.CharField(max_length=255, blank=True, default="")
+    changes = models.JSONField(blank=True, default=dict)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["company", "content_type", "object_id"], name="audit_co_ct_obj_idx"),
+            models.Index(fields=["company", "-created_at"], name="audit_co_created_idx"),
+        ]
+
+    def __str__(self):
+        staff_str = self.staff.full_name if self.staff else "System"
+        return f"{self.action.upper()} {self.content_type.model} #{self.object_id} by {staff_str} at {self.created_at}"

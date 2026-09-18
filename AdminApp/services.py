@@ -189,8 +189,20 @@ def create_lead_for_company(
     assigned_to=None,
     priority="Medium",
     lead_description=None,
+    enquiry_type="not_specified",
+    product=None,
+    service=None,
 ):
-    lead = Lead.objects.create(
+    # Enforce enquiry_type normalization rules
+    if enquiry_type == "product":
+        service = None
+    elif enquiry_type == "service":
+        product = None
+    elif enquiry_type == "not_specified":
+        product = None
+        service = None
+
+    lead = Lead(
         company=company,
         full_name=full_name,
         phone_number=phone_number,
@@ -200,7 +212,12 @@ def create_lead_for_company(
         assigned_to=assigned_to,
         priority=priority,
         lead_description=lead_description,
+        enquiry_type=enquiry_type,
+        product=product,
+        service=service,
     )
+    lead.clean()
+    lead.save()
 
     if lead.assigned_to and lead.assigned_to.user:
         try:
@@ -223,4 +240,4 @@ def create_lead_for_company(
                 lead.id
             )
 
-    return lead
+    return lead
