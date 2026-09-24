@@ -39,7 +39,9 @@ from django.db.models import Count
 from django.db import transaction
 
 from AdminApp.email_utils import send_invite_email
-from AdminApp.models import Accounts, Address, Call, Case, CaseSolution, Company, Customer, Deal, Invoice, InvoiceItem, Lead, Meeting, PicklistOption, PriceBook, PriceBookItem, Product, PurchaseOrder, PurchaseOrderItem, QuoteProduct, Quotes, SalesOrder, SalesOrderItem, Service, Staff, Task, Vendor,MeetingParticipant,MeetingAttendeeLog
+from AdminApp.models import Accounts, Address, Call, Case, CaseSolution, Company, Customer, Deal, Invoice, InvoiceItem, Lead, Meeting, PicklistOption, PriceBook, PriceBookItem, Product, PurchaseOrder, PurchaseOrderItem, QuoteProduct, Quotes, SalesOrder, SalesOrderItem, Service, Staff, StickyNote, Task, Vendor,MeetingParticipant,MeetingAttendeeLog
+from AdminApp.serializers import StickyNoteSerializer
+from django.utils.dateparse import parse_datetime
 
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
@@ -8050,3 +8052,226 @@ def view_audit_history(request, model_name, object_id):
 
     summary = get_audit_summary_for_object(request.company, model_class, object_id=object_id)
     return JsonResponse(summary, safe=False)
+
+
+# ── Sticky Note Views ─────────────────────────────────────────────────────────
+
+def _get_sticky_note_context(request):
+    """
+    Safely resolve the current Staff and Company for Sticky Note operations.
+    Guarantees strict multi-tenant isolation by deriving ownership purely from
+    the authenticated user / session and never trusting client-supplied IDs.
+    """
+    staff = getattr(request, "staff", None)
+    if not staff and request.user and request.user.is_authenticated:
+        staff = Staff.objects.select_related("company").filter(user=request.user).first()
+        if not staff and getattr(request.user, "email", None):
+            staff = Staff.objects.select_related("company").filter(email__iexact=request.user.email).first()
+            if staff and staff.user_id != request.user.id:
+                staff.user = request.user
+                staff.save(update_fields=["user"])
+
+    company = getattr(request, "company", None)
+    if not company and staff:
+        company = staff.company
+
+    return staff, company
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def view_sticky_note(request):
+    """
+    GET /api/admin/sticky-note/view/
+    Retrieves the authenticated Staff member's single Sticky Note.
+    Automatically creates a blank one via get_or_create if it does not exist.
+    """
+    staff, company = _get_sticky_note_context(request)
+    if not staff:
+        return Response({"message": "Staff profile not found for authenticated user."}, status=status.HTTP_404_NOT_FOUND)
+
+    sticky_note, _ = StickyNote.objects.get_or_create(
+        staff=staff,
+        defaults={"company": company or staff.company}
+    )
+    if not sticky_note.company and (company or staff.company):
+        sticky_note.company = company or staff.company
+        sticky_note.save(update_fields=["company"])
+
+    serializer = StickyNoteSerializer(sticky_note)
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+@api_view(["PUT", "PATCH"])
+@permission_classes([IsAuthenticated])
+def update_sticky_note(request):
+    """
+    PUT /api/admin/sticky-note/update/
+    Updates content, color, reminder_at, and is_completed.
+    Safe for debounced auto-save.
+    Preserves rich-text / HTML content without stripping.
+    If reminder_at is updated with a new reminder datetime, resets is_completed to False.
+    """
+    staff, company = _get_sticky_note_context(request)
+    if not staff:
+        return Response({"message": "Staff profile not found for authenticated user."}, status=status.HTTP_404_NOT_FOUND)
+
+    sticky_note, _ = StickyNote.objects.get_or_create(
+        staff=staff,
+        defaults={"company": company or staff.company}
+    )
+    if not sticky_note.company and (company or staff.company):
+        sticky_note.company = company or staff.company
+
+    data = request.data
+
+    if "content" in data:
+        sticky_note.content = data.get("content") or ""
+
+    if "color" in data:
+        sticky_note.color = data.get("color") or "yellow"
+
+    reminder_changed = False
+    if "reminder_at" in data:
+        raw_reminder = data.get("reminder_at")
+        if raw_reminder in [None, "", "null"]:
+            parsed_reminder = None
+        elif isinstance(raw_reminder, timezone.datetime):
+            parsed_reminder = raw_reminder
+            if timezone.is_naive(parsed_reminder):
+                parsed_reminder = timezone.make_aware(parsed_reminder)
+        else:
+            parsed_reminder = parse_datetime(str(raw_reminder))
+            if parsed_reminder is None:
+                try:
+                    from dateutil import parser
+                    parsed_reminder = parser.parse(str(raw_reminder))
+                    if timezone.is_naive(parsed_reminder):
+                        parsed_reminder = timezone.make_aware(parsed_reminder)
+                except Exception:
+                    return Response(
+                        {"message": "Invalid reminder_at format. Use ISO 8601 (e.g. YYYY-MM-DDTHH:MM:SSZ)."},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+            elif timezone.is_naive(parsed_reminder):
+                parsed_reminder = timezone.make_aware(parsed_reminder)
+
+        if parsed_reminder != sticky_note.reminder_at:
+            sticky_note.reminder_at = parsed_reminder
+            sticky_note.is_completed = False
+            reminder_changed = True
+
+    if "is_completed" in data and not reminder_changed:
+        sticky_note.is_completed = bool(data.get("is_completed"))
+
+    sticky_note.save()
+    serializer = StickyNoteSerializer(sticky_note)
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def delete_sticky_note(request):
+    """
+    DELETE /api/admin/sticky-note/delete/
+    Deletes the authenticated Staff member's single Sticky Note.
+    Next time view_sticky_note is called, a new blank note will be created.
+    """
+    staff, _ = _get_sticky_note_context(request)
+    if not staff:
+        return Response({"message": "Staff profile not found for authenticated user."}, status=status.HTTP_404_NOT_FOUND)
+
+    StickyNote.objects.filter(staff=staff).delete()
+    return Response({"message": "Sticky note deleted successfully."}, status=status.HTTP_200_OK)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def complete_sticky_note(request):
+    """
+    POST /api/admin/sticky-note/complete/
+    Marks the current Staff member's Sticky Note reminder as completed.
+    This dismisses the notification badge on the frontend.
+    """
+    staff, company = _get_sticky_note_context(request)
+    if not staff:
+        return Response({"message": "Staff profile not found for authenticated user."}, status=status.HTTP_404_NOT_FOUND)
+
+    sticky_note, _ = StickyNote.objects.get_or_create(
+        staff=staff,
+        defaults={"company": company or staff.company}
+    )
+    sticky_note.is_completed = True
+    sticky_note.save(update_fields=["is_completed", "updated_at"])
+
+    serializer = StickyNoteSerializer(sticky_note)
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def clear_sticky_note_reminder(request):
+    """
+    POST /api/admin/sticky-note/clear-reminder/
+    Clears the reminder datetime and resets is_completed to False.
+    """
+    staff, company = _get_sticky_note_context(request)
+    if not staff:
+        return Response({"message": "Staff profile not found for authenticated user."}, status=status.HTTP_404_NOT_FOUND)
+
+    sticky_note, _ = StickyNote.objects.get_or_create(
+        staff=staff,
+        defaults={"company": company or staff.company}
+    )
+    sticky_note.reminder_at = None
+    sticky_note.is_completed = False
+    sticky_note.save(update_fields=["reminder_at", "is_completed", "updated_at"])
+
+    serializer = StickyNoteSerializer(sticky_note)
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def view_due_sticky_note(request):
+    """
+    GET /api/admin/sticky-note/due/
+    Checks whether the authenticated Staff member has a due reminder:
+    - reminder_at IS NOT NULL
+    - reminder_at <= timezone.now()
+    - is_completed == False
+
+    Returns:
+      {"has_reminder": True, "sticky_note": {...}} if due
+      {"has_reminder": False, "sticky_note": None} otherwise
+
+    Does NOT mutate or dismiss the reminder state. Safe for continuous frontend polling.
+    """
+    staff, _ = _get_sticky_note_context(request)
+    if not staff:
+        return Response({"message": "Staff profile not found for authenticated user."}, status=status.HTTP_404_NOT_FOUND)
+
+    sticky_note = StickyNote.objects.filter(staff=staff).first()
+    now = timezone.now()
+
+    if (
+        sticky_note is not None
+        and sticky_note.reminder_at is not None
+        and sticky_note.reminder_at <= now
+        and not sticky_note.is_completed
+    ):
+        return Response(
+            {
+                "has_reminder": True,
+                "sticky_note": StickyNoteSerializer(sticky_note).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    return Response(
+        {
+            "has_reminder": False,
+            "sticky_note": None,
+        },
+        status=status.HTTP_200_OK,
+    )

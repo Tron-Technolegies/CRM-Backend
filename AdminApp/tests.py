@@ -7,8 +7,9 @@ from django.contrib.auth.models import User
 from rest_framework.test import APIRequestFactory, force_authenticate
 from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
-
-from AdminApp.models import Company, Staff, EmailIntegration, Product, Service, Lead, AuditLog
+from datetime import timedelta
+from django.utils import timezone
+from AdminApp.models import Company, Staff, EmailIntegration, Product, Service, Lead, AuditLog, StickyNote
 from AdminApp.permissions import (
     ROLE_PERMISSIONS,
     has_permission,
@@ -1180,6 +1181,395 @@ class LeadEnquiryTypeTests(TestCase):
         # Ensure no heavy nested product or service dicts are returned
         self.assertNotIn("product", item)
         self.assertNotIn("service", item)
+
+
+class StickyNoteTests(TestCase):
+    """
+    Comprehensive tests for the Staff Sticky Note feature:
+    - Automatic creation on first GET
+    - Auto-save content & rich-text HTML preservation
+    - Color updates
+    - Reminder setting, updating, clearing, and completing
+    - Reminder reset when reminder_at changes
+    - Deletion and subsequent recreation
+    - Multi-tenant and cross-staff isolation
+    - Due reminder detection without mutation during polling
+    """
+
+    def setUp(self):
+        self.client = Client()
+
+        # Company 1 with two staff members
+        self.company_1 = Company.objects.create(
+            name="Acme Corporation",
+            email="info@acme.com",
+        )
+        self.user_1 = User.objects.create_user(
+            username="staff_one",
+            email="staff1@acme.com",
+            password="SecurePassword2026!",
+        )
+        self.staff_1 = Staff.objects.create(
+            user=self.user_1,
+            company=self.company_1,
+            full_name="Staff One",
+            email="staff1@acme.com",
+            role="sales agent",
+            is_accepted=True,
+        )
+        self.token_1 = str(RefreshToken.for_user(self.user_1).access_token)
+        self.auth_headers_1 = {"HTTP_AUTHORIZATION": f"Bearer {self.token_1}"}
+
+        self.user_2 = User.objects.create_user(
+            username="staff_two",
+            email="staff2@acme.com",
+            password="SecurePassword2026!",
+        )
+        self.staff_2 = Staff.objects.create(
+            user=self.user_2,
+            company=self.company_1,
+            full_name="Staff Two",
+            email="staff2@acme.com",
+            role="sales agent",
+            is_accepted=True,
+        )
+        self.token_2 = str(RefreshToken.for_user(self.user_2).access_token)
+        self.auth_headers_2 = {"HTTP_AUTHORIZATION": f"Bearer {self.token_2}"}
+
+        # Company 2 (foreign tenant)
+        self.company_2 = Company.objects.create(
+            name="Globex Corporation",
+            email="info@globex.com",
+        )
+        self.user_foreign = User.objects.create_user(
+            username="foreign_staff",
+            email="staff@globex.com",
+            password="SecurePassword2026!",
+        )
+        self.staff_foreign = Staff.objects.create(
+            user=self.user_foreign,
+            company=self.company_2,
+            full_name="Foreign Staff",
+            email="staff@globex.com",
+            role="admin",
+            is_accepted=True,
+        )
+        self.token_foreign = str(RefreshToken.for_user(self.user_foreign).access_token)
+        self.auth_headers_foreign = {"HTTP_AUTHORIZATION": f"Bearer {self.token_foreign}"}
+
+    def test_first_get_automatically_creates_sticky_note(self):
+        """First GET /api/admin/sticky-note/view/ creates an empty note for the staff."""
+        self.assertFalse(StickyNote.objects.filter(staff=self.staff_1).exists())
+
+        resp = self.client.get("/api/admin/sticky-note/view/", **self.auth_headers_1)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+
+        self.assertEqual(data["content"], "")
+        self.assertEqual(data["color"], "yellow")
+        self.assertIsNone(data["reminder_at"])
+        self.assertFalse(data["is_completed"])
+        self.assertIn("id", data)
+
+        self.assertTrue(StickyNote.objects.filter(staff=self.staff_1).exists())
+        note = StickyNote.objects.get(staff=self.staff_1)
+        self.assertEqual(note.company, self.company_1)
+
+    def test_update_content_debounced_autosave(self):
+        """PUT /api/admin/sticky-note/update/ updates content and is safe for frequent auto-saves."""
+        # Initial create & update
+        resp = self.client.put(
+            "/api/admin/sticky-note/update/",
+            data={"content": "Meeting notes with client at 3 PM"},
+            content_type="application/json",
+            **self.auth_headers_1,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["content"], "Meeting notes with client at 3 PM")
+
+        # Second update (simulating debounced typing auto-save)
+        resp2 = self.client.put(
+            "/api/admin/sticky-note/update/",
+            data={"content": "Meeting notes with client at 3 PM - updated location"},
+            content_type="application/json",
+            **self.auth_headers_1,
+        )
+        self.assertEqual(resp2.status_code, 200)
+        self.assertEqual(resp2.json()["content"], "Meeting notes with client at 3 PM - updated location")
+
+        # Exactly 1 note exists for staff_1
+        self.assertEqual(StickyNote.objects.filter(staff=self.staff_1).count(), 1)
+
+    def test_preserve_rich_text_html_content(self):
+        """PUT /api/admin/sticky-note/update/ preserves rich-text HTML markup without stripping."""
+        html_content = "<p><strong>Call John</strong></p>\n<p>Discuss <em>Q3 budget</em> &amp; goals.</p>"
+        resp = self.client.put(
+            "/api/admin/sticky-note/update/",
+            data={"content": html_content},
+            content_type="application/json",
+            **self.auth_headers_1,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["content"], html_content)
+
+        # Confirm persisted exactly in DB
+        note = StickyNote.objects.get(staff=self.staff_1)
+        self.assertEqual(note.content, html_content)
+
+    def test_update_color(self):
+        """PUT /api/admin/sticky-note/update/ updates color field."""
+        resp = self.client.put(
+            "/api/admin/sticky-note/update/",
+            data={"color": "#74b9ff"},
+            content_type="application/json",
+            **self.auth_headers_1,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["color"], "#74b9ff")
+
+        note = StickyNote.objects.get(staff=self.staff_1)
+        self.assertEqual(note.color, "#74b9ff")
+
+    def test_set_and_update_reminder(self):
+        """PUT /api/admin/sticky-note/update/ sets reminder_at correctly."""
+        future_dt = timezone.now() + timedelta(days=2)
+        future_iso = future_dt.isoformat()
+
+        resp = self.client.put(
+            "/api/admin/sticky-note/update/",
+            data={"reminder_at": future_iso},
+            content_type="application/json",
+            **self.auth_headers_1,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNotNone(resp.json()["reminder_at"])
+
+        note = StickyNote.objects.get(staff=self.staff_1)
+        self.assertIsNotNone(note.reminder_at)
+
+    def test_update_reminder_resets_is_completed(self):
+        """Changing reminder_at resets is_completed to False."""
+        past_dt = timezone.now() - timedelta(hours=1)
+        note = StickyNote.objects.create(
+            company=self.company_1,
+            staff=self.staff_1,
+            content="Task note",
+            reminder_at=past_dt,
+            is_completed=True,  # previously marked completed
+        )
+
+        # Set new reminder
+        new_dt = timezone.now() + timedelta(days=3)
+        resp = self.client.put(
+            "/api/admin/sticky-note/update/",
+            data={"reminder_at": new_dt.isoformat()},
+            content_type="application/json",
+            **self.auth_headers_1,
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertFalse(data["is_completed"])
+
+        note.refresh_from_db()
+        self.assertFalse(note.is_completed)
+
+    def test_clear_reminder(self):
+        """POST /api/admin/sticky-note/clear-reminder/ clears reminder and resets is_completed."""
+        StickyNote.objects.create(
+            company=self.company_1,
+            staff=self.staff_1,
+            reminder_at=timezone.now() + timedelta(days=1),
+            is_completed=True,
+        )
+
+        resp = self.client.post("/api/admin/sticky-note/clear-reminder/", **self.auth_headers_1)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIsNone(data["reminder_at"])
+        self.assertFalse(data["is_completed"])
+
+        note = StickyNote.objects.get(staff=self.staff_1)
+        self.assertIsNone(note.reminder_at)
+        self.assertFalse(note.is_completed)
+
+    def test_complete_reminder(self):
+        """POST /api/admin/sticky-note/complete/ marks reminder as completed."""
+        StickyNote.objects.create(
+            company=self.company_1,
+            staff=self.staff_1,
+            reminder_at=timezone.now() - timedelta(minutes=5),
+            is_completed=False,
+        )
+
+        resp = self.client.post("/api/admin/sticky-note/complete/", **self.auth_headers_1)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()["is_completed"])
+
+        note = StickyNote.objects.get(staff=self.staff_1)
+        self.assertTrue(note.is_completed)
+
+    def test_delete_sticky_note(self):
+        """DELETE /api/admin/sticky-note/delete/ deletes the note for the staff."""
+        StickyNote.objects.create(
+            company=self.company_1,
+            staff=self.staff_1,
+            content="Temporary reminder note",
+        )
+        self.assertTrue(StickyNote.objects.filter(staff=self.staff_1).exists())
+
+        resp = self.client.delete("/api/admin/sticky-note/delete/", **self.auth_headers_1)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(StickyNote.objects.filter(staff=self.staff_1).exists())
+
+    def test_auto_recreation_after_deletion(self):
+        """Opening the sticky note again after deletion creates a clean blank note."""
+        StickyNote.objects.create(
+            company=self.company_1,
+            staff=self.staff_1,
+            content="Old note",
+            color="red",
+        )
+        self.client.delete("/api/admin/sticky-note/delete/", **self.auth_headers_1)
+
+        resp = self.client.get("/api/admin/sticky-note/view/", **self.auth_headers_1)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["content"], "")
+        self.assertEqual(data["color"], "yellow")
+        self.assertIsNone(data["reminder_at"])
+
+    def test_staff_isolation_same_company(self):
+        """Staff 1 and Staff 2 in the same company have completely independent notes."""
+        self.client.put(
+            "/api/admin/sticky-note/update/",
+            data={"content": "Note for Staff One", "color": "purple"},
+            content_type="application/json",
+            **self.auth_headers_1,
+        )
+        self.client.put(
+            "/api/admin/sticky-note/update/",
+            data={"content": "Note for Staff Two", "color": "green"},
+            content_type="application/json",
+            **self.auth_headers_2,
+        )
+
+        resp_1 = self.client.get("/api/admin/sticky-note/view/", **self.auth_headers_1)
+        resp_2 = self.client.get("/api/admin/sticky-note/view/", **self.auth_headers_2)
+
+        self.assertEqual(resp_1.json()["content"], "Note for Staff One")
+        self.assertEqual(resp_1.json()["color"], "purple")
+
+        self.assertEqual(resp_2.json()["content"], "Note for Staff Two")
+        self.assertEqual(resp_2.json()["color"], "green")
+
+        # Staff 1 deleting their note does not affect Staff 2
+        self.client.delete("/api/admin/sticky-note/delete/", **self.auth_headers_1)
+        self.assertFalse(StickyNote.objects.filter(staff=self.staff_1).exists())
+        self.assertTrue(StickyNote.objects.filter(staff=self.staff_2).exists())
+
+    def test_multi_tenant_isolation_different_companies(self):
+        """Staff in Company A and Staff in Company B are isolated; client cannot override tenant."""
+        self.client.put(
+            "/api/admin/sticky-note/update/",
+            data={"content": "Company 1 Secret Note", "company_id": self.company_2.id, "staff_id": self.staff_foreign.id},
+            content_type="application/json",
+            **self.auth_headers_1,
+        )
+
+        note_1 = StickyNote.objects.get(staff=self.staff_1)
+        self.assertEqual(note_1.company, self.company_1)
+        self.assertNotEqual(note_1.company, self.company_2)
+
+        # Foreign tenant accesses their own note
+        resp_f = self.client.get("/api/admin/sticky-note/view/", **self.auth_headers_foreign)
+        self.assertEqual(resp_f.json()["content"], "")
+
+    def test_due_reminder_when_time_reached(self):
+        """GET /api/admin/sticky-note/due/ returns has_reminder=True when reminder_at is reached and uncompleted."""
+        StickyNote.objects.create(
+            company=self.company_1,
+            staff=self.staff_1,
+            content="Call lead immediately",
+            reminder_at=timezone.now() - timedelta(minutes=10),
+            is_completed=False,
+        )
+
+        resp = self.client.get("/api/admin/sticky-note/due/", **self.auth_headers_1)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data["has_reminder"])
+        self.assertIsNotNone(data["sticky_note"])
+        self.assertEqual(data["sticky_note"]["content"], "Call lead immediately")
+
+    def test_completed_reminder_not_due(self):
+        """A past reminder marked is_completed=True returns has_reminder=False."""
+        StickyNote.objects.create(
+            company=self.company_1,
+            staff=self.staff_1,
+            content="Already done",
+            reminder_at=timezone.now() - timedelta(minutes=10),
+            is_completed=True,
+        )
+
+        resp = self.client.get("/api/admin/sticky-note/due/", **self.auth_headers_1)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertFalse(data["has_reminder"])
+        self.assertIsNone(data["sticky_note"])
+
+    def test_future_reminder_not_due(self):
+        """A reminder in the future returns has_reminder=False."""
+        StickyNote.objects.create(
+            company=self.company_1,
+            staff=self.staff_1,
+            content="Future task",
+            reminder_at=timezone.now() + timedelta(hours=2),
+            is_completed=False,
+        )
+
+        resp = self.client.get("/api/admin/sticky-note/due/", **self.auth_headers_1)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertFalse(data["has_reminder"])
+        self.assertIsNone(data["sticky_note"])
+
+    def test_null_reminder_not_due(self):
+        """A note without a reminder returns has_reminder=False."""
+        StickyNote.objects.create(
+            company=self.company_1,
+            staff=self.staff_1,
+            content="Note with no reminder",
+            reminder_at=None,
+            is_completed=False,
+        )
+
+        resp = self.client.get("/api/admin/sticky-note/due/", **self.auth_headers_1)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertFalse(data["has_reminder"])
+        self.assertIsNone(data["sticky_note"])
+
+    def test_due_endpoint_repeated_polling_does_not_mutate(self):
+        """GET /api/admin/sticky-note/due/ does NOT mutate reminder_at or is_completed on polling."""
+        past_time = timezone.now() - timedelta(minutes=5)
+        StickyNote.objects.create(
+            company=self.company_1,
+            staff=self.staff_1,
+            content="Persistent notification",
+            reminder_at=past_time,
+            is_completed=False,
+        )
+
+        # Poll three times
+        for _ in range(3):
+            resp = self.client.get("/api/admin/sticky-note/due/", **self.auth_headers_1)
+            self.assertEqual(resp.status_code, 200)
+            self.assertTrue(resp.json()["has_reminder"])
+
+        # DB values remain identical
+        note = StickyNote.objects.get(staff=self.staff_1)
+        self.assertEqual(note.reminder_at, past_time)
+        self.assertFalse(note.is_completed)
 
 
 

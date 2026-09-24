@@ -183,4 +183,12 @@ urlpatterns= [
 
     # ── Global Audit Trail / Edit History ──────────────────────────────────────
     path('audit/<str:model_name>/<int:object_id>/', views.view_audit_history, name='audit-history'),
+
+    # ── Sticky Note ────────────────────────────────────────────────────────────
+    path('sticky-note/view/', views.view_sticky_note, name='view-sticky-note'),
+    path('sticky-note/update/', views.update_sticky_note, name='update-sticky-note'),
+    path('sticky-note/delete/', views.delete_sticky_note, name='delete-sticky-note'),
+    path('sticky-note/complete/', views.complete_sticky_note, name='complete-sticky-note'),
+    path('sticky-note/clear-reminder/', views.clear_sticky_note_reminder, name='clear-sticky-note-reminder'),
+    path('sticky-note/due/', views.view_due_sticky_note, name='view-due-sticky-note'),
 ]

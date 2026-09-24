@@ -1382,3 +1382,41 @@ class AuditLog(models.Model):
     def __str__(self):
         staff_str = self.staff.full_name if self.staff else "System"
         return f"{self.action.upper()} {self.content_type.model} #{self.object_id} by {staff_str} at {self.created_at}"
+
+
+class StickyNote(models.Model):
+    company = models.ForeignKey(
+        Company,
+        on_delete=models.CASCADE,
+        related_name="sticky_notes"
+    )
+    staff = models.OneToOneField(
+        Staff,
+        on_delete=models.CASCADE,
+        related_name="sticky_note"
+    )
+    content = models.TextField(
+        blank=True,
+        default=""
+    )
+    color = models.CharField(
+        max_length=20,
+        default="yellow"
+    )
+    reminder_at = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+    is_completed = models.BooleanField(
+        default=False
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+    updated_at = models.DateTimeField(
+        auto_now=True
+    )
+
+    def __str__(self):
+        staff_name = self.staff.full_name if self.staff else "Unknown"
+        return f"StickyNote - {staff_name} ({self.company.name if self.company else 'No Company'})"
