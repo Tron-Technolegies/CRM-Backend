@@ -25,8 +25,8 @@ from django.core import signing
 from django.shortcuts import redirect
 from .jaas import generate_jaas_jwt
 from django.utils import timezone
-from django.tasks import task
-from django.utils import json, timezone
+import json
+from django.utils import timezone
 from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, render
 import requests
@@ -36,7 +36,7 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db.models import Sum
 from django.db.models.functions import TruncWeek
 from django.db.models import Count
-from django.db import transaction
+from django.db import transaction, IntegrityError
 
 from AdminApp.email_utils import send_invite_email
 from AdminApp.models import Accounts, Address, Call, Case, CaseSolution, Company, Customer, Deal, Invoice, InvoiceItem, Lead, Meeting, PicklistOption, PriceBook, PriceBookItem, Product, PurchaseOrder, PurchaseOrderItem, QuoteProduct, Quotes, SalesOrder, SalesOrderItem, Service, Staff, StickyNote, Task, Vendor,MeetingParticipant,MeetingAttendeeLog
@@ -65,6 +65,7 @@ from AdminApp.services import create_lead_for_company, get_related_label, notify
 from .models import (
     EmailIntegration,
     MetaIntegration,
+    MetaPage,
     Meeting,
     MeetingParticipant,
     MeetingAttendeeLog,
@@ -456,7 +457,12 @@ def meta_connect(request):
     params = {
         "client_id": settings.META_APP_ID,
         "redirect_uri": settings.META_REDIRECT_URI,
-        "scope": "public_profile,email,ads_management,ads_read",
+        "scope":(
+                    "public_profile,email,"
+                    "ads_management,ads_read,"
+                    "pages_show_list,pages_read_engagement,"
+                    "pages_manage_ads,leads_retrieval"
+                ),
         "state": state,
         "response_type": "code",
     }
@@ -480,7 +486,93 @@ def meta_disconnect(request):
     integration.is_active = False
     integration.save(update_fields=["is_active", "updated_at"])
 
+    # Deactivate all connected Facebook pages for this company
+    MetaPage.objects.filter(company=request.company).update(is_active=False)
+
     return JsonResponse({"message": "Meta disconnected successfully"})
+
+
+def retrieve_facebook_pages(access_token):
+    """
+    Retrieve Facebook Pages accessible by the given access token.
+    1. Query GET /me/accounts with cursor pagination (for classic/direct pages).
+    2. Inspect debug_token granular_scopes (for New Pages Experience / Business asset pages).
+    3. For any target_ids in granular_scopes not in /me/accounts, query GET /{page_id}?fields=id,name,access_token.
+    Returns: (pages_list, error_reason)
+    """
+    pages = []
+    seen_page_ids = set()
+
+    # Step 1: /me/accounts with pagination
+    page_url = "https://graph.facebook.com/v24.0/me/accounts"
+    page_params = {
+        "fields": "id,name,access_token",
+        "access_token": access_token,
+        "limit": 100,
+    }
+
+    while page_url:
+        try:
+            page_response = requests.get(
+                page_url,
+                params=page_params,
+                timeout=30
+            )
+            page_data = page_response.json()
+        except requests.RequestException:
+            logger.exception("Meta pages request failed")
+            return None, "pages_failed"
+
+        if "error" in page_data:
+            logger.error("META PAGES ERROR: %s", page_data.get("error", {}).get("message", "Unknown error"))
+            return None, "pages_failed"
+
+        data = page_data.get("data", [])
+        for p in data:
+            p_id = str(p.get("id") or "")
+            if p_id and p_id not in seen_page_ids:
+                seen_page_ids.add(p_id)
+                pages.append(p)
+
+        paging = page_data.get("paging", {})
+        page_url = paging.get("next")
+        page_params = None
+
+    # Step 2: Granular scopes inspection via debug_token (handles New Pages Experience / Business assets)
+    if settings.META_APP_ID and settings.META_APP_SECRET:
+        try:
+            app_token = f"{settings.META_APP_ID}|{settings.META_APP_SECRET}"
+            debug_resp = requests.get(
+                "https://graph.facebook.com/debug_token",
+                params={"input_token": access_token, "access_token": app_token},
+                timeout=30,
+            )
+            debug_data = debug_resp.json().get("data", {})
+            granular = debug_data.get("granular_scopes", [])
+            target_page_ids = set()
+            for s in granular:
+                if s.get("scope") in ["pages_show_list", "pages_read_engagement", "pages_manage_ads", "leads_retrieval"]:
+                    for tid in s.get("target_ids", []):
+                        if tid and str(tid) not in seen_page_ids:
+                            target_page_ids.add(str(tid))
+
+            for pid in target_page_ids:
+                try:
+                    p_resp = requests.get(
+                        f"https://graph.facebook.com/v24.0/{pid}",
+                        params={"fields": "id,name,access_token", "access_token": access_token},
+                        timeout=30,
+                    )
+                    p_data = p_resp.json()
+                    if p_data.get("id") and "error" not in p_data:
+                        seen_page_ids.add(str(p_data["id"]))
+                        pages.append(p_data)
+                except requests.RequestException:
+                    logger.warning("Failed to fetch granular page details for page_id=%s", pid)
+        except Exception:
+            logger.exception("Failed to inspect granular scopes for pages")
+
+    return pages, None
 
 
 @api_view(["GET"])
@@ -547,7 +639,7 @@ def meta_callback(request):
             return redirect(f"{settings_page}?meta=error&reason=token_exchange_failed")
 
         if "access_token" not in token_data:
-            logger.error("META TOKEN EXCHANGE RESPONSE: %s", token_data)
+            logger.error("META TOKEN EXCHANGE FAILED: code returned no access token")
             return redirect(f"{settings_page}?meta=error&reason=no_access_token")
 
         access_token = token_data["access_token"]
@@ -565,10 +657,8 @@ def meta_callback(request):
             logger.exception("Meta user request failed")
             return redirect(f"{settings_page}?meta=error&reason=meta_user_failed")
 
-        logger.info("META USER RESPONSE: %s", me_data)
-
         if "error" in me_data:
-            logger.error("META USER FETCH ERROR: %s", me_data)
+            logger.error("META USER FETCH ERROR: %s", me_data.get("error", {}).get("message", "Unknown error"))
             return redirect(f"{settings_page}?meta=error&reason=meta_user_failed")
 
         meta_user_id = me_data.get("id")
@@ -585,40 +675,24 @@ def meta_callback(request):
             logger.exception("Meta ad account request failed")
             return redirect(f"{settings_page}?meta=error&reason=ad_accounts_failed")
 
-        logger.warning("META AD ACCOUNTS RESPONSE: %s", ad_data)
-
         if "error" in ad_data:
-            logger.error("META AD ACCOUNTS ERROR: %s", ad_data)
+            logger.error("META AD ACCOUNTS ERROR: %s", ad_data.get("error", {}).get("message", "Unknown error"))
             return redirect(f"{settings_page}?meta=error&reason=ad_accounts_failed")
 
         ad_accounts = ad_data.get("data", [])
         first_ad_account_id = ad_accounts[0].get("id") if ad_accounts else None
         logger.info("Meta Ad Accounts found: %s", len(ad_accounts))
 
-        # Get Facebook pages
-        try:
-            page_response = requests.get(
-                "https://graph.facebook.com/v24.0/me/accounts",
-                params={"fields": "id,name,access_token", "access_token": access_token},
-                timeout=30
-            )
-            page_data = page_response.json()
-        except requests.RequestException:
-            logger.exception("Meta pages request failed")
-            return redirect(f"{settings_page}?meta=error&reason=pages_failed")
+        pages, error_reason = retrieve_facebook_pages(access_token)
+        if error_reason:
+            return redirect(f"{settings_page}?meta=error&reason={error_reason}")
 
-        logger.warning("META PAGES RESPONSE: %s", page_data)
+        logger.info("Meta Pages found across all sources: %s", len(pages))
 
-        if "error" in page_data:
-            logger.error("META PAGES ERROR: %s", page_data)
-            return redirect(f"{settings_page}?meta=error&reason=pages_failed")
-
-        pages = page_data.get("data", [])
         first_page_id = pages[0].get("id") if pages else None
-        page_access_token = pages[0].get("access_token") if pages else None
-        logger.info("Meta Pages found: %s", len(pages))
+        first_page_token = pages[0].get("access_token") if pages else None
 
-        # Save integration
+        # Save primary integration (preserves legacy fields for backwards compatibility)
         integration, created = MetaIntegration.objects.update_or_create(
             company=company,
             defaults={
@@ -626,17 +700,40 @@ def meta_callback(request):
                 "access_token": access_token,
                 "ad_account_id": first_ad_account_id,
                 "page_id": first_page_id,
-                "page_access_token": page_access_token,
+                "page_access_token": first_page_token,
                 "assigned_staff": staff,
                 "is_active": True,
             }
         )
 
+        # Deactivate previously active pages for this company that are no longer in authorized pages
+        new_page_ids = {str(p.get("id")) for p in pages if p.get("id")}
+        MetaPage.objects.filter(company=company).exclude(page_id__in=new_page_ids).update(is_active=False)
+
+        # Save or update each authorized Facebook Page in MetaPage
+        saved_page_count = 0
+        for p in pages:
+            p_id = p.get("id")
+            p_name = p.get("name") or ""
+            p_token = p.get("access_token")
+            if not p_id:
+                continue
+
+            MetaPage.objects.update_or_create(
+                company=company,
+                page_id=str(p_id),
+                defaults={
+                    "meta_integration": integration,
+                    "page_name": p_name,
+                    "page_access_token": p_token,
+                    "is_active": True,
+                }
+            )
+            saved_page_count += 1
+
         logger.info(
-            "Meta integration saved successfully. company=%s created=%s "
-            "meta_user_id=%s ad_account_id=%s page_id=%s staff_id=%s",
-            company.id, created, meta_user_id, first_ad_account_id,
-            first_page_id, staff.id if staff else None
+            "Meta integration saved successfully. company=%s created=%s pages_synced=%s",
+            company.id, created, saved_page_count
         )
 
         return redirect(f"{settings_page}?meta=connected")
@@ -645,7 +742,6 @@ def meta_callback(request):
         logger.exception("META CALLBACK CRASHED")
         return redirect(f"{settings_page}?meta=error&reason=unhandled_exception")
 
-    
 
 @api_view(["GET"])
 @require_permission('integration.view')
@@ -658,23 +754,254 @@ def meta_status(request):
     if not integration:
         return JsonResponse({
             "connected": False,
+            "hasConnectedPage": False,
+            "has_connected_page": False,
             "metaUserId": None,
+            "meta_user_id": None,
             "adAccountId": None,
+            "ad_account_id": None,
             "pageId": None,
+            "page_id": None,
+            "pageName": None,
+            "page_name": None,
             "hasPageAccessToken": False,
+            "has_page_access_token": False,
             "hasAccessToken": False,
+            "has_access_token": False,
             "hasAssignedStaff": False,
+            "has_assigned_staff": False,
+            "pages": [],
         })
+
+    active_pages = list(
+        MetaPage.objects.filter(company=request.company, is_active=True).order_by("-updated_at", "-created_at")
+    )
+    pages_data = [
+        {
+            "id": p.id,
+            "pageId": p.page_id,
+            "page_id": p.page_id,
+            "pageName": p.page_name,
+            "page_name": p.page_name,
+            "isActive": p.is_active,
+            "is_active": p.is_active,
+        }
+        for p in active_pages
+    ]
+
+    # Resolve primary or selected Page ID and Page Name
+    primary_page_id = None
+    primary_page_name = None
+    primary_has_token = False
+
+    if integration.page_id:
+        matched = next((p for p in active_pages if p.page_id == integration.page_id), None)
+        if matched:
+            primary_page_id = matched.page_id
+            primary_page_name = matched.page_name
+            primary_has_token = bool(matched.page_access_token or integration.page_access_token)
+        else:
+            primary_page_id = integration.page_id
+            primary_page_name = ""
+            primary_has_token = bool(integration.page_access_token)
+    elif active_pages:
+        primary_page_id = active_pages[0].page_id
+        primary_page_name = active_pages[0].page_name
+        primary_has_token = bool(active_pages[0].page_access_token)
+
+    has_connected_page = bool(primary_page_id)
 
     return JsonResponse({
         "connected": True,
+        "hasConnectedPage": has_connected_page,
+        "has_connected_page": has_connected_page,
         "metaUserId": integration.meta_user_id,
+        "meta_user_id": integration.meta_user_id,
         "adAccountId": integration.ad_account_id,
-        "pageId": integration.page_id,
-        "hasPageAccessToken": bool(integration.page_access_token),
+        "ad_account_id": integration.ad_account_id,
+        "pageId": primary_page_id,
+        "page_id": primary_page_id,
+        "pageName": primary_page_name,
+        "page_name": primary_page_name,
+        "hasPageAccessToken": primary_has_token,
+        "has_page_access_token": primary_has_token,
         "hasAccessToken": bool(integration.access_token),
+        "has_access_token": bool(integration.access_token),
         "hasAssignedStaff": bool(integration.assigned_staff),
+        "has_assigned_staff": bool(integration.assigned_staff),
+        "pages": pages_data,
     })
+
+
+def process_meta_lead(leadgen_id, page_id, form_id=None, ad_id=None):
+    """
+    Process a single Meta Leadgen event:
+    1. Check for duplicate leadgen_id (idempotency).
+    2. Identify the active MetaPage and Company.
+    3. Retrieve the full lead payload from Meta Graph API.
+    4. Normalize fields and map them to CRM Lead model.
+    5. Save the lead under the correct company atomically.
+    """
+    if not leadgen_id or not page_id:
+        logger.warning("Meta webhook leadgen event missing leadgen_id or page_id")
+        return False, "missing_ids"
+
+    leadgen_id = str(leadgen_id).strip()
+    page_id = str(page_id).strip()
+
+    # Idempotency check: prevent duplicate imports
+    if Lead.objects.filter(meta_lead_id=leadgen_id).exists():
+        logger.info("Meta lead %s already imported. Skipping duplicate event.", leadgen_id)
+        return True, "duplicate"
+
+    # Multi-tenant isolation: find the MetaPage belonging to the tenant
+    meta_page = MetaPage.objects.filter(
+        page_id=page_id,
+        is_active=True
+    ).select_related("company", "meta_integration").first()
+
+    if not meta_page:
+        # Fallback check on legacy MetaIntegration
+        legacy_integration = MetaIntegration.objects.filter(
+            page_id=page_id,
+            is_active=True
+        ).select_related("company").first()
+
+        if not legacy_integration or not legacy_integration.company:
+            logger.warning("Meta webhook: no active MetaPage found for page_id=%s", page_id)
+            return False, "page_not_found"
+
+        company = legacy_integration.company
+        assigned_staff = legacy_integration.assigned_staff
+        token_to_use = legacy_integration.page_access_token or legacy_integration.access_token
+        page_name = ""
+    else:
+        company = meta_page.company
+        assigned_staff = meta_page.meta_integration.assigned_staff if meta_page.meta_integration else None
+        token_to_use = meta_page.page_access_token or (
+            meta_page.meta_integration.access_token if meta_page.meta_integration else None
+        )
+        page_name = meta_page.page_name
+
+    if not token_to_use:
+        logger.error("Meta webhook: no valid access token available for page_id=%s", page_id)
+        return False, "no_access_token"
+
+    # Retrieve lead details from Meta Graph API
+    lead_api_url = f"https://graph.facebook.com/v24.0/{leadgen_id}"
+    try:
+        resp = requests.get(lead_api_url, params={"access_token": token_to_use}, timeout=30)
+        lead_data = resp.json()
+    except requests.RequestException:
+        logger.exception("Meta Graph API request failed for leadgen_id=%s", leadgen_id)
+        return False, "network_error"
+
+    if "error" in lead_data:
+        err = lead_data.get("error", {})
+        logger.error(
+            "Meta Graph API error for leadgen_id=%s: code=%s message=%s",
+            leadgen_id, err.get("code"), err.get("message")
+        )
+        return False, "api_error"
+
+    # Parse and normalize field_data
+    form_fields = {}
+    for item in lead_data.get("field_data", []):
+        raw_name = str(item.get("name") or "").strip().lower()
+        values = item.get("values", [])
+        raw_value = values[0] if values and isinstance(values[0], str) else ""
+        if raw_name:
+            form_fields[raw_name] = str(raw_value).strip()
+
+    # Normalize name
+    first_name = form_fields.get("first_name", "")
+    last_name = form_fields.get("last_name", "")
+    full_name = (
+        form_fields.get("full_name") or
+        form_fields.get("name") or
+        f"{first_name} {last_name}".strip() or
+        form_fields.get("email") or
+        f"Meta Lead {leadgen_id}"
+    )
+
+    # Normalize phone
+    phone_number = (
+        form_fields.get("phone_number") or
+        form_fields.get("phone") or
+        form_fields.get("contact_number") or
+        form_fields.get("mobile_number") or
+        ""
+    )[:50]
+
+    # Normalize email
+    email = (
+        form_fields.get("email") or
+        form_fields.get("work_email") or
+        None
+    )
+
+    # Normalize company/business name
+    lead_company_name = (
+        form_fields.get("company_name") or
+        form_fields.get("business_name") or
+        form_fields.get("organization_name") or
+        ""
+    )[:255]
+
+    # Build description containing additional form answers
+    standard_keys = {
+        "full_name", "name", "first_name", "last_name",
+        "phone_number", "phone", "contact_number", "mobile_number",
+        "email", "work_email", "company_name", "business_name", "organization_name"
+    }
+    desc_lines = []
+    if page_name:
+        desc_lines.append(f"Facebook Page: {page_name} ({page_id})")
+    else:
+        desc_lines.append(f"Facebook Page ID: {page_id}")
+    if form_id:
+        desc_lines.append(f"Form ID: {form_id}")
+    if ad_id:
+        desc_lines.append(f"Ad ID: {ad_id}")
+
+    custom_entries = [
+        f"- {k.replace('_', ' ').title()}: {v}"
+        for k, v in form_fields.items()
+        if k not in standard_keys and v
+    ]
+    if custom_entries:
+        desc_lines.append("Form Answers:")
+        desc_lines.extend(custom_entries)
+
+    lead_description = "\n".join(desc_lines)
+
+    # Create the lead in the CRM atomically
+    try:
+        with transaction.atomic():
+            lead = Lead.objects.create(
+                company=company,
+                full_name=full_name,
+                phone_number=phone_number,
+                email=email,
+                company_name=lead_company_name,
+                lead_source="Facebook Ads",
+                status="new",
+                meta_lead_id=leadgen_id,
+                assigned_to=assigned_staff,
+                priority="Medium",
+                lead_description=lead_description,
+            )
+        logger.info(
+            "Successfully created CRM lead from Meta Ads: lead_id=%s company_id=%s meta_lead_id=%s",
+            lead.id, company.id, leadgen_id
+        )
+        return True, "created"
+    except IntegrityError:
+        logger.info("Concurrent duplicate delivery caught for meta_lead_id=%s", leadgen_id)
+        return True, "duplicate"
+    except Exception:
+        logger.exception("Failed to save CRM lead for meta_lead_id=%s", leadgen_id)
+        return False, "save_error"
 
 
 @api_view(["GET", "POST"])
@@ -716,9 +1043,40 @@ def meta_webhook(request):
             logger.warning("Meta webhook: could not parse JSON body")
             return HttpResponse(status=400)
 
-        logger.info("Meta webhook event received: %s", payload)
+        logger.info("Meta webhook event received: object=%s", payload.get("object"))
 
-        # TODO: process Meta Lead Ads events here
+        if payload.get("object") != "page":
+            return HttpResponse(status=200)
+
+        entries = payload.get("entry", [])
+        if not isinstance(entries, list):
+            return HttpResponse(status=200)
+
+        has_recoverable_error = False
+        for entry in entries:
+            entry_page_id = str(entry.get("id") or "")
+            changes = entry.get("changes", [])
+            for change in changes:
+                if change.get("field") != "leadgen":
+                    continue
+
+                value = change.get("value", {})
+                leadgen_id = value.get("leadgen_id")
+                page_id = value.get("page_id") or entry_page_id
+                form_id = value.get("form_id")
+                ad_id = value.get("ad_id")
+
+                success, reason = process_meta_lead(
+                    leadgen_id=leadgen_id,
+                    page_id=page_id,
+                    form_id=form_id,
+                    ad_id=ad_id,
+                )
+                if not success and reason == "network_error":
+                    has_recoverable_error = True
+
+        if has_recoverable_error:
+            return HttpResponse("Temporary Graph API error", status=500)
 
         return HttpResponse(status=200)
 

@@ -1,15 +1,19 @@
+import hmac
+import hashlib
+import json
 from unittest.mock import patch, MagicMock
 from urllib.parse import urlparse, parse_qs
-from django.test import TestCase, Client
+from django.test import TestCase, Client, override_settings
 from django.core import signing
 from django.conf import settings
 from django.contrib.auth.models import User
+from django.db import IntegrityError
 from rest_framework.test import APIRequestFactory, force_authenticate
 from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
 from datetime import timedelta
 from django.utils import timezone
-from AdminApp.models import Company, Staff, EmailIntegration, Product, Service, Lead, AuditLog, StickyNote
+from AdminApp.models import Company, Staff, EmailIntegration, Product, Service, Lead, AuditLog, StickyNote, MetaIntegration, MetaPage
 from AdminApp.permissions import (
     ROLE_PERMISSIONS,
     has_permission,
@@ -1570,6 +1574,779 @@ class StickyNoteTests(TestCase):
         note = StickyNote.objects.get(staff=self.staff_1)
         self.assertEqual(note.reminder_at, past_time)
         self.assertFalse(note.is_completed)
+
+
+class MetaAdsIntegrationTests(TestCase):
+    """
+    Comprehensive test suite for Meta Ads Integration:
+    - MetaPage model creation, multi-page support, and uniqueness constraints.
+    - OAuth callback pagination and page saving.
+    - Webhook GET verification and POST signature validation.
+    - Lead retrieval from Graph API, field mapping, and CRM lead creation.
+    - Duplicate idempotency, error handling, missing field fallbacks, and multi-tenant isolation.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.company_a = Company.objects.create(name="Company A", email="comp_a@test.com")
+        self.company_b = Company.objects.create(name="Company B", email="comp_b@test.com")
+
+        self.user_a = User.objects.create_user(username="usera", email="usera@test.com", password="password123")
+        self.staff_a = Staff.objects.create(
+            user=self.user_a,
+            company=self.company_a,
+            full_name="Staff A",
+            email="usera@test.com",
+            role="admin",
+            is_accepted=True,
+        )
+
+        self.integration_a = MetaIntegration.objects.create(
+            company=self.company_a,
+            meta_user_id="meta_usr_123",
+            access_token="EAAB_test_user_token",
+            ad_account_id="act_111111",
+            page_id="page_1001",
+            page_access_token="EAAB_test_page_token_1001",
+            assigned_staff=self.staff_a,
+            is_active=True,
+        )
+
+        self.page_a1 = MetaPage.objects.create(
+            company=self.company_a,
+            meta_integration=self.integration_a,
+            page_id="page_1001",
+            page_name="Company A Main Page",
+            page_access_token="EAAB_test_page_token_1001",
+            is_active=True,
+        )
+
+        self.page_a2 = MetaPage.objects.create(
+            company=self.company_a,
+            meta_integration=self.integration_a,
+            page_id="page_1002",
+            page_name="Company A Secondary Page",
+            page_access_token="EAAB_test_page_token_1002",
+            is_active=True,
+        )
+
+        # Company B setup
+        self.user_b = User.objects.create_user(username="userb", email="userb@test.com", password="password123")
+        self.staff_b = Staff.objects.create(
+            user=self.user_b,
+            company=self.company_b,
+            full_name="Staff B",
+            email="userb@test.com",
+            role="admin",
+            is_accepted=True,
+        )
+
+        self.integration_b = MetaIntegration.objects.create(
+            company=self.company_b,
+            meta_user_id="meta_usr_456",
+            access_token="EAAB_test_b_token",
+            ad_account_id="act_222222",
+            page_id="page_2001",
+            page_access_token="EAAB_test_page_token_2001",
+            assigned_staff=self.staff_b,
+            is_active=True,
+        )
+        self.page_b = MetaPage.objects.create(
+            company=self.company_b,
+            meta_integration=self.integration_b,
+            page_id="page_2001",
+            page_name="Company B Page",
+            page_access_token="EAAB_test_page_token_2001",
+            is_active=True,
+        )
+
+    # 1. MetaPage creation
+    def test_metapage_creation(self):
+        page = MetaPage.objects.get(page_id="page_1001")
+        self.assertEqual(page.company, self.company_a)
+        self.assertEqual(page.page_name, "Company A Main Page")
+        self.assertEqual(page.page_access_token, "EAAB_test_page_token_1001")
+        self.assertTrue(page.is_active)
+        self.assertIn("Company A Main Page", str(page))
+
+    # 2. Multiple Pages associated with one company
+    def test_multiple_pages_associated_with_one_company(self):
+        pages = MetaPage.objects.filter(company=self.company_a)
+        self.assertEqual(pages.count(), 2)
+        page_ids = set(pages.values_list("page_id", flat=True))
+        self.assertEqual(page_ids, {"page_1001", "page_1002"})
+
+    # 3. Preventing duplicate Page connections
+    def test_preventing_duplicate_page_connections(self):
+        with self.assertRaises(IntegrityError):
+            MetaPage.objects.create(
+                company=self.company_a,
+                meta_integration=self.integration_a,
+                page_id="page_1001",  # duplicate for company_a
+                page_name="Duplicate Page",
+            )
+
+    # 4. OAuth callback saving multiple Pages (with pagination)
+    @patch("requests.get")
+    def test_oauth_callback_saving_multiple_pages(self, mock_get):
+        state = signing.dumps(
+            {"company_id": self.company_a.id, "staff_id": self.staff_a.id},
+            salt="meta-oauth",
+        )
+
+        token_resp = MagicMock()
+        token_resp.json.return_value = {"access_token": "new_user_token"}
+
+        me_resp = MagicMock()
+        me_resp.json.return_value = {"id": "meta_usr_999", "name": "Admin User"}
+
+        ad_resp = MagicMock()
+        ad_resp.json.return_value = {"data": [{"id": "act_999999"}]}
+
+        page1_resp = MagicMock()
+        page1_resp.json.return_value = {
+            "data": [
+                {"id": "page_3001", "name": "Brand A Page", "access_token": "token_3001"},
+            ],
+            "paging": {
+                "next": "https://graph.facebook.com/v24.0/me/accounts?after=cursor_123"
+            }
+        }
+
+        page2_resp = MagicMock()
+        page2_resp.json.return_value = {
+            "data": [
+                {"id": "page_3002", "name": "Brand B Page", "access_token": "token_3002"},
+            ],
+            "paging": {}
+        }
+
+        debug_resp = MagicMock()
+        debug_resp.json.return_value = {"data": {"granular_scopes": []}}
+
+        mock_get.side_effect = [token_resp, me_resp, ad_resp, page1_resp, page2_resp, debug_resp]
+
+        with override_settings(
+            META_APP_ID="app123",
+            META_APP_SECRET="sec123",
+            META_REDIRECT_URI="https://backend/api/admin/integrations/meta/callback/",
+            FRONTEND_URL="https://tron-crm.netlify.app",
+        ):
+            resp = self.client.get(
+                f"/api/admin/integrations/meta/callback/?code=test_code&state={state}"
+            )
+            self.assertEqual(resp.status_code, 302)
+            self.assertIn("meta=connected", resp.url)
+
+        pages = MetaPage.objects.filter(company=self.company_a)
+        saved_page_ids = set(pages.values_list("page_id", flat=True))
+        self.assertIn("page_3001", saved_page_ids)
+        self.assertIn("page_3002", saved_page_ids)
+
+        p1 = MetaPage.objects.get(company=self.company_a, page_id="page_3001")
+        self.assertEqual(p1.page_name, "Brand A Page")
+        self.assertEqual(p1.page_access_token, "token_3001")
+
+    # 5. Correct Page-to-company identification
+    def test_page_to_company_identification(self):
+        page = MetaPage.objects.filter(page_id="page_1002", is_active=True).first()
+        self.assertIsNotNone(page)
+        self.assertEqual(page.company, self.company_a)
+
+    # 6. Valid webhook verification (GET)
+    @override_settings(META_WEBHOOK_VERIFY_TOKEN="my_test_verify_token")
+    def test_valid_webhook_verification(self):
+        resp = self.client.get(
+            "/api/admin/webhooks/meta/?hub.mode=subscribe&hub.verify_token=my_test_verify_token&hub.challenge=test_challenge_1234"
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.content.decode("utf-8"), "test_challenge_1234")
+
+    # 7. Invalid webhook verification (GET)
+    @override_settings(META_WEBHOOK_VERIFY_TOKEN="my_test_verify_token")
+    def test_invalid_webhook_verification(self):
+        resp = self.client.get(
+            "/api/admin/webhooks/meta/?hub.mode=subscribe&hub.verify_token=wrong_token&hub.challenge=test_challenge_1234"
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    # 8. Valid POST signature
+    @override_settings(META_APP_SECRET="super_secret_key")
+    def test_valid_post_signature(self):
+        body = json.dumps({"object": "page", "entry": []}).encode("utf-8")
+        sig = "sha256=" + hmac.new(b"super_secret_key", body, hashlib.sha256).hexdigest()
+
+        resp = self.client.post(
+            "/api/admin/webhooks/meta/",
+            data=body,
+            content_type="application/json",
+            HTTP_X_HUB_SIGNATURE_256=sig,
+        )
+        self.assertEqual(resp.status_code, 200)
+
+    # 9. Invalid POST signature
+    @override_settings(META_APP_SECRET="super_secret_key")
+    def test_invalid_post_signature(self):
+        body = json.dumps({"object": "page", "entry": []}).encode("utf-8")
+        resp = self.client.post(
+            "/api/admin/webhooks/meta/",
+            data=body,
+            content_type="application/json",
+            HTTP_X_HUB_SIGNATURE_256="sha256=invalid_hash",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    # 10. Successful Meta lead retrieval and import
+    @patch("requests.get")
+    def test_successful_meta_lead_retrieval_and_import(self, mock_get):
+        lead_api_mock = MagicMock()
+        lead_api_mock.json.return_value = {
+            "id": "lead_99901",
+            "created_time": "2026-10-16T05:00:00+0000",
+            "field_data": [
+                {"name": "full_name", "values": ["Alice Walker"]},
+                {"name": "phone_number", "values": ["+15551234567"]},
+                {"name": "email", "values": ["alice@example.com"]},
+                {"name": "company_name", "values": ["Walker Tech"]},
+                {"name": "city", "values": ["San Francisco"]},
+            ]
+        }
+        mock_get.return_value = lead_api_mock
+
+        payload = {
+            "object": "page",
+            "entry": [
+                {
+                    "id": "page_1001",
+                    "time": 1720000000,
+                    "changes": [
+                        {
+                            "field": "leadgen",
+                            "value": {
+                                "leadgen_id": "lead_99901",
+                                "page_id": "page_1001",
+                                "form_id": "form_888",
+                                "ad_id": "ad_777",
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+        body = json.dumps(payload).encode("utf-8")
+
+        with override_settings(META_APP_SECRET=""):
+            resp = self.client.post(
+                "/api/admin/webhooks/meta/",
+                data=body,
+                content_type="application/json",
+            )
+            self.assertEqual(resp.status_code, 200)
+
+        lead = Lead.objects.get(meta_lead_id="lead_99901")
+        self.assertEqual(lead.company, self.company_a)
+        self.assertEqual(lead.full_name, "Alice Walker")
+        self.assertEqual(lead.phone_number, "+15551234567")
+        self.assertEqual(lead.email, "alice@example.com")
+        self.assertEqual(lead.company_name, "Walker Tech")
+        self.assertEqual(lead.lead_source, "Facebook Ads")
+        self.assertEqual(lead.status, "new")
+        self.assertEqual(lead.assigned_to, self.staff_a)
+        self.assertIn("City: San Francisco", lead.lead_description)
+
+    # 11. Duplicate webhook delivery
+    @patch("requests.get")
+    def test_duplicate_webhook_delivery(self, mock_get):
+        lead_api_mock = MagicMock()
+        lead_api_mock.json.return_value = {
+            "id": "lead_dup_100",
+            "field_data": [
+                {"name": "full_name", "values": ["Duplicate User"]},
+                {"name": "phone_number", "values": ["+15550000000"]},
+                {"name": "email", "values": ["dup@example.com"]},
+            ]
+        }
+        mock_get.return_value = lead_api_mock
+
+        payload = {
+            "object": "page",
+            "entry": [
+                {
+                    "id": "page_1001",
+                    "changes": [
+                        {
+                            "field": "leadgen",
+                            "value": {"leadgen_id": "lead_dup_100", "page_id": "page_1001"}
+                        }
+                    ]
+                }
+            ]
+        }
+        body = json.dumps(payload).encode("utf-8")
+
+        with override_settings(META_APP_SECRET=""):
+            resp1 = self.client.post("/api/admin/webhooks/meta/", data=body, content_type="application/json")
+            self.assertEqual(resp1.status_code, 200)
+
+            lead = Lead.objects.get(meta_lead_id="lead_dup_100")
+            lead.lead_description = "Manual edit by agent"
+            lead.save()
+
+            resp2 = self.client.post("/api/admin/webhooks/meta/", data=body, content_type="application/json")
+            self.assertEqual(resp2.status_code, 200)
+
+        self.assertEqual(Lead.objects.filter(meta_lead_id="lead_dup_100").count(), 1)
+        lead.refresh_from_db()
+        self.assertEqual(lead.lead_description, "Manual edit by agent")
+
+    # 12. Missing optional form fields
+    @patch("requests.get")
+    def test_missing_optional_form_fields(self, mock_get):
+        lead_api_mock = MagicMock()
+        lead_api_mock.json.return_value = {
+            "id": "lead_opt_101",
+            "field_data": [
+                {"name": "full_name", "values": ["Bob Dylan"]},
+                {"name": "phone_number", "values": ["+15559998888"]},
+            ]
+        }
+        mock_get.return_value = lead_api_mock
+
+        payload = {
+            "object": "page",
+            "entry": [
+                {
+                    "id": "page_1001",
+                    "changes": [
+                        {
+                            "field": "leadgen",
+                            "value": {"leadgen_id": "lead_opt_101", "page_id": "page_1001"}
+                        }
+                    ]
+                }
+            ]
+        }
+
+        with override_settings(META_APP_SECRET=""):
+            resp = self.client.post("/api/admin/webhooks/meta/", data=json.dumps(payload), content_type="application/json")
+            self.assertEqual(resp.status_code, 200)
+
+        lead = Lead.objects.get(meta_lead_id="lead_opt_101")
+        self.assertEqual(lead.full_name, "Bob Dylan")
+        self.assertEqual(lead.phone_number, "+15559998888")
+        self.assertIsNone(lead.email)
+        self.assertEqual(lead.company_name, "")
+
+    # 13. Missing required lead fields
+    @patch("requests.get")
+    def test_missing_required_lead_fields(self, mock_get):
+        lead_api_mock = MagicMock()
+        lead_api_mock.json.return_value = {
+            "id": "lead_req_102",
+            "field_data": [
+                {"name": "first_name", "values": ["Charlie"]},
+                {"name": "last_name", "values": ["Brown"]},
+                {"name": "email", "values": ["charlie@example.com"]},
+            ]
+        }
+        mock_get.return_value = lead_api_mock
+
+        payload = {
+            "object": "page",
+            "entry": [
+                {
+                    "id": "page_1001",
+                    "changes": [
+                        {
+                            "field": "leadgen",
+                            "value": {"leadgen_id": "lead_req_102", "page_id": "page_1001"}
+                        }
+                    ]
+                }
+            ]
+        }
+
+        with override_settings(META_APP_SECRET=""):
+            resp = self.client.post("/api/admin/webhooks/meta/", data=json.dumps(payload), content_type="application/json")
+            self.assertEqual(resp.status_code, 200)
+
+        lead = Lead.objects.get(meta_lead_id="lead_req_102")
+        self.assertEqual(lead.full_name, "Charlie Brown")
+        self.assertEqual(lead.phone_number, "")
+        self.assertEqual(lead.email, "charlie@example.com")
+
+    # 14. Meta API failures
+    @patch("requests.get")
+    def test_meta_api_failures(self, mock_get):
+        err_mock = MagicMock()
+        err_mock.json.return_value = {
+            "error": {
+                "message": "Error validating access token: Session has expired.",
+                "type": "OAuthException",
+                "code": 190,
+            }
+        }
+        mock_get.return_value = err_mock
+
+        payload = {
+            "object": "page",
+            "entry": [
+                {
+                    "id": "page_1001",
+                    "changes": [
+                        {
+                            "field": "leadgen",
+                            "value": {"leadgen_id": "lead_err_103", "page_id": "page_1001"}
+                        }
+                    ]
+                }
+            ]
+        }
+
+        with override_settings(META_APP_SECRET=""):
+            resp = self.client.post("/api/admin/webhooks/meta/", data=json.dumps(payload), content_type="application/json")
+            self.assertEqual(resp.status_code, 200)
+
+        self.assertFalse(Lead.objects.filter(meta_lead_id="lead_err_103").exists())
+
+    # 15. Page access-token failures
+    def test_page_access_token_failures(self):
+        self.page_a1.page_access_token = None
+        self.page_a1.save()
+        self.integration_a.access_token = ""
+        self.integration_a.save()
+
+        payload = {
+            "object": "page",
+            "entry": [
+                {
+                    "id": "page_1001",
+                    "changes": [
+                        {
+                            "field": "leadgen",
+                            "value": {"leadgen_id": "lead_no_token_104", "page_id": "page_1001"}
+                        }
+                    ]
+                }
+            ]
+        }
+
+        with override_settings(META_APP_SECRET=""):
+            resp = self.client.post("/api/admin/webhooks/meta/", data=json.dumps(payload), content_type="application/json")
+            self.assertEqual(resp.status_code, 200)
+
+        self.assertFalse(Lead.objects.filter(meta_lead_id="lead_no_token_104").exists())
+
+    # 16. Preventing cross-company lead imports
+    @patch("requests.get")
+    def test_preventing_cross_company_lead_imports(self, mock_get):
+        lead_api_mock = MagicMock()
+        lead_api_mock.json.return_value = {
+            "id": "lead_comp_b_105",
+            "field_data": [
+                {"name": "full_name", "values": ["Customer for Company B"]},
+                {"name": "phone_number", "values": ["+12223334444"]},
+                {"name": "email", "values": ["b@compb.com"]},
+            ]
+        }
+        mock_get.return_value = lead_api_mock
+
+        payload = {
+            "object": "page",
+            "entry": [
+                {
+                    "id": "page_2001",
+                    "changes": [
+                        {
+                            "field": "leadgen",
+                            "value": {"leadgen_id": "lead_comp_b_105", "page_id": "page_2001"}
+                        }
+                    ]
+                }
+            ]
+        }
+
+        with override_settings(META_APP_SECRET=""):
+            resp = self.client.post("/api/admin/webhooks/meta/", data=json.dumps(payload), content_type="application/json")
+            self.assertEqual(resp.status_code, 200)
+
+        lead_b = Lead.objects.get(meta_lead_id="lead_comp_b_105")
+        self.assertEqual(lead_b.company, self.company_b)
+        self.assertNotEqual(lead_b.company, self.company_a)
+        self.assertFalse(Lead.objects.filter(company=self.company_a, meta_lead_id="lead_comp_b_105").exists())
+
+    # 17. OAuth callback with empty pages (user has no pages or didn't grant permission)
+    @patch("requests.get")
+    def test_oauth_callback_with_empty_pages(self, mock_get):
+        state = signing.dumps(
+            {"company_id": self.company_a.id, "staff_id": self.staff_a.id},
+            salt="meta-oauth",
+        )
+
+        token_resp = MagicMock()
+        token_resp.json.return_value = {"access_token": "token_no_pages"}
+
+        me_resp = MagicMock()
+        me_resp.json.return_value = {"id": "meta_usr_empty", "name": "No Pages User"}
+
+        ad_resp = MagicMock()
+        ad_resp.json.return_value = {"data": [{"id": "act_888888"}]}
+
+        page_resp = MagicMock()
+        page_resp.json.return_value = {"data": []}  # empty list of pages
+
+        debug_resp = MagicMock()
+        debug_resp.json.return_value = {"data": {"granular_scopes": []}}
+
+        mock_get.side_effect = [token_resp, me_resp, ad_resp, page_resp, debug_resp]
+
+        with override_settings(
+            META_APP_ID="app123",
+            META_APP_SECRET="sec123",
+            META_REDIRECT_URI="https://backend/api/admin/integrations/meta/callback/",
+            FRONTEND_URL="https://tron-crm.netlify.app",
+        ):
+            resp = self.client.get(
+                f"/api/admin/integrations/meta/callback/?code=test_code&state={state}"
+            )
+            self.assertEqual(resp.status_code, 302)
+            self.assertIn("meta=connected", resp.url)
+
+        integration = MetaIntegration.objects.get(company=self.company_a)
+        self.assertEqual(integration.meta_user_id, "meta_usr_empty")
+        self.assertIsNone(integration.page_id)
+        self.assertIsNone(integration.page_access_token)
+        self.assertTrue(integration.is_active)
+
+        # Previously active pages for company_a should be deactivated
+        active_pages = MetaPage.objects.filter(company=self.company_a, is_active=True)
+        self.assertEqual(active_pages.count(), 0)
+
+        # Status endpoint should report connected=True, but hasConnectedPage=False
+        token_a = str(RefreshToken.for_user(self.user_a).access_token)
+        status_resp = self.client.get(
+            "/api/admin/integrations/meta/status/",
+            HTTP_AUTHORIZATION=f"Bearer {token_a}"
+        )
+        self.assertEqual(status_resp.status_code, 200)
+        data = status_resp.json()
+        self.assertTrue(data["connected"])
+        self.assertFalse(data["hasConnectedPage"])
+        self.assertFalse(data["has_connected_page"])
+        self.assertIsNone(data["pageId"])
+        self.assertIsNone(data["pageName"])
+        self.assertEqual(data["pages"], [])
+
+    # 18. OAuth callback handling Graph API error on pages request
+    @patch("requests.get")
+    def test_oauth_callback_pages_api_error(self, mock_get):
+        state = signing.dumps(
+            {"company_id": self.company_a.id, "staff_id": self.staff_a.id},
+            salt="meta-oauth",
+        )
+
+        token_resp = MagicMock()
+        token_resp.json.return_value = {"access_token": "token_err"}
+
+        me_resp = MagicMock()
+        me_resp.json.return_value = {"id": "meta_usr_err", "name": "Error User"}
+
+        ad_resp = MagicMock()
+        ad_resp.json.return_value = {"data": []}
+
+        page_err_resp = MagicMock()
+        page_err_resp.json.return_value = {
+            "error": {"message": "Invalid OAuth access token.", "type": "OAuthException", "code": 190}
+        }
+
+        mock_get.side_effect = [token_resp, me_resp, ad_resp, page_err_resp]
+
+        with override_settings(
+            META_APP_ID="app123",
+            META_APP_SECRET="sec123",
+            META_REDIRECT_URI="https://backend/api/admin/integrations/meta/callback/",
+            FRONTEND_URL="https://tron-crm.netlify.app",
+        ):
+            resp = self.client.get(
+                f"/api/admin/integrations/meta/callback/?code=test_code&state={state}"
+            )
+            self.assertEqual(resp.status_code, 302)
+            self.assertIn("reason=pages_failed", resp.url)
+
+    # 19. OAuth callback discovers page via granular_scopes target_ids (New Pages Experience)
+    @patch("requests.get")
+    def test_oauth_callback_granular_scopes_page_discovery(self, mock_get):
+        state = signing.dumps(
+            {"company_id": self.company_a.id, "staff_id": self.staff_a.id},
+            salt="meta-oauth",
+        )
+
+        token_resp = MagicMock()
+        token_resp.json.return_value = {"access_token": "token_npe"}
+
+        me_resp = MagicMock()
+        me_resp.json.return_value = {"id": "meta_usr_npe", "name": "NPE User"}
+
+        ad_resp = MagicMock()
+        ad_resp.json.return_value = {"data": []}
+
+        # /me/accounts returns empty list (New Pages Experience / Business Asset)
+        page_accounts_resp = MagicMock()
+        page_accounts_resp.json.return_value = {"data": []}
+
+        # debug_token lists target_ids in granular_scopes
+        debug_resp = MagicMock()
+        debug_resp.json.return_value = {
+            "data": {
+                "granular_scopes": [
+                    {"scope": "pages_show_list", "target_ids": ["page_4001"]},
+                    {"scope": "leads_retrieval", "target_ids": ["page_4001"]},
+                ]
+            }
+        }
+
+        # direct page detail query GET /page_4001?fields=id,name,access_token
+        page_detail_resp = MagicMock()
+        page_detail_resp.json.return_value = {
+            "id": "page_4001",
+            "name": "Tron Technologies",
+            "access_token": "token_page_4001",
+        }
+
+        mock_get.side_effect = [
+            token_resp, me_resp, ad_resp, page_accounts_resp, debug_resp, page_detail_resp
+        ]
+
+        with override_settings(
+            META_APP_ID="app123",
+            META_APP_SECRET="sec123",
+            META_REDIRECT_URI="https://backend/api/admin/integrations/meta/callback/",
+            FRONTEND_URL="https://tron-crm.netlify.app",
+        ):
+            resp = self.client.get(
+                f"/api/admin/integrations/meta/callback/?code=test_code&state={state}"
+            )
+            self.assertEqual(resp.status_code, 302)
+            self.assertIn("meta=connected", resp.url)
+
+        # Verify page is saved to database
+        saved_page = MetaPage.objects.get(company=self.company_a, page_id="page_4001")
+        self.assertEqual(saved_page.page_name, "Tron Technologies")
+        self.assertEqual(saved_page.page_access_token, "token_page_4001")
+        self.assertTrue(saved_page.is_active)
+
+        # Verify integration primary page is set
+        integration = MetaIntegration.objects.get(company=self.company_a)
+        self.assertEqual(integration.page_id, "page_4001")
+        self.assertEqual(integration.page_access_token, "token_page_4001")
+
+        # Verify status endpoint returns page details
+        token_a = str(RefreshToken.for_user(self.user_a).access_token)
+        status_resp = self.client.get(
+            "/api/admin/integrations/meta/status/",
+            HTTP_AUTHORIZATION=f"Bearer {token_a}"
+        )
+        self.assertEqual(status_resp.status_code, 200)
+        data = status_resp.json()
+        self.assertTrue(data["connected"])
+        self.assertTrue(data["hasConnectedPage"])
+        self.assertEqual(data["pageId"], "page_4001")
+        self.assertEqual(data["pageName"], "Tron Technologies")
+
+    # 19. Meta status with active connected Pages
+    def test_meta_status_with_pages(self):
+        token_a = str(RefreshToken.for_user(self.user_a).access_token)
+        resp = self.client.get(
+            "/api/admin/integrations/meta/status/",
+            HTTP_AUTHORIZATION=f"Bearer {token_a}"
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+
+        self.assertTrue(data["connected"])
+        self.assertTrue(data["hasConnectedPage"])
+        self.assertTrue(data["has_connected_page"])
+        self.assertEqual(data["pageId"], "page_1001")
+        self.assertEqual(data["page_id"], "page_1001")
+        self.assertEqual(data["pageName"], "Company A Main Page")
+        self.assertEqual(data["page_name"], "Company A Main Page")
+        self.assertEqual(data["adAccountId"], "act_111111")
+        self.assertEqual(data["ad_account_id"], "act_111111")
+        self.assertTrue(data["hasPageAccessToken"])
+        self.assertTrue(data["hasAccessToken"])
+        self.assertEqual(len(data["pages"]), 2)
+        self.assertIn("pageId", data["pages"][0])
+        self.assertIn("pageName", data["pages"][0])
+
+        # Security check: tokens must never be returned in response
+        self.assertNotIn("access_token", data)
+        self.assertNotIn("page_access_token", data)
+        for p in data["pages"]:
+            self.assertNotIn("access_token", p)
+            self.assertNotIn("page_access_token", p)
+
+    # 20. Disconnect flow deactivates integration and pages
+    def test_meta_disconnect_flow(self):
+        token_a = str(RefreshToken.for_user(self.user_a).access_token)
+
+        resp = self.client.post(
+            "/api/admin/integrations/meta/disconnect/",
+            HTTP_AUTHORIZATION=f"Bearer {token_a}"
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        self.integration_a.refresh_from_db()
+        self.assertFalse(self.integration_a.is_active)
+
+        self.page_a1.refresh_from_db()
+        self.assertFalse(self.page_a1.is_active)
+        self.page_a2.refresh_from_db()
+        self.assertFalse(self.page_a2.is_active)
+
+        # Company B pages must remain completely untouched
+        self.page_b.refresh_from_db()
+        self.assertTrue(self.page_b.is_active)
+
+        # Status after disconnect
+        status_resp = self.client.get(
+            "/api/admin/integrations/meta/status/",
+            HTTP_AUTHORIZATION=f"Bearer {token_a}"
+        )
+        self.assertEqual(status_resp.status_code, 200)
+        data = status_resp.json()
+        self.assertFalse(data["connected"])
+        self.assertFalse(data["hasConnectedPage"])
+        self.assertEqual(data["pages"], [])
+
+    # 21. Multi-tenant company isolation on status endpoint
+    def test_meta_company_isolation_on_status(self):
+        token_a = str(RefreshToken.for_user(self.user_a).access_token)
+        token_b = str(RefreshToken.for_user(self.user_b).access_token)
+
+        resp_a = self.client.get("/api/admin/integrations/meta/status/", HTTP_AUTHORIZATION=f"Bearer {token_a}")
+        resp_b = self.client.get("/api/admin/integrations/meta/status/", HTTP_AUTHORIZATION=f"Bearer {token_b}")
+
+        self.assertEqual(resp_a.status_code, 200)
+        self.assertEqual(resp_b.status_code, 200)
+
+        data_a = resp_a.json()
+        data_b = resp_b.json()
+
+        # Company A data
+        self.assertEqual(data_a["metaUserId"], "meta_usr_123")
+        self.assertEqual(data_a["pageId"], "page_1001")
+        page_ids_a = [p["pageId"] for p in data_a["pages"]]
+        self.assertEqual(set(page_ids_a), {"page_1001", "page_1002"})
+
+        # Company B data
+        self.assertEqual(data_b["metaUserId"], "meta_usr_456")
+        self.assertEqual(data_b["pageId"], "page_2001")
+        page_ids_b = [p["pageId"] for p in data_b["pages"]]
+        self.assertEqual(page_ids_b, ["page_2001"])
+
+        # No leakage across tenants
+        self.assertNotIn("page_2001", page_ids_a)
+        self.assertNotIn("page_1001", page_ids_b)
 
 
 

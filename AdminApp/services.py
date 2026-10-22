@@ -192,6 +192,7 @@ def create_lead_for_company(
     enquiry_type="not_specified",
     product=None,
     service=None,
+    meta_lead_id=None,
 ):
     # Enforce enquiry_type normalization rules
     if enquiry_type == "product":
@@ -215,6 +216,7 @@ def create_lead_for_company(
         enquiry_type=enquiry_type,
         product=product,
         service=service,
+        meta_lead_id=meta_lead_id,
     )
     lead.clean()
     lead.save()

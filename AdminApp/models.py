@@ -90,9 +90,9 @@ class Lead(models.Model):
     company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True, related_name="leads")
 
     full_name = models.CharField(max_length=255)
-    phone_number = models.CharField(max_length=20)
+    phone_number = models.CharField(max_length=50, blank=True, default="")
     email = models.EmailField(blank=True, null=True)
-    company_name = models.CharField(max_length=255)
+    company_name = models.CharField(max_length=255, blank=True, default="")
     lead_source = models.CharField(max_length=50, choices=SOURCE_CHOICES, default="Website")
     assigned_to = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name="leads")
     priority = models.CharField(max_length=20, choices=PRIORITY_CHOICES, default="Medium")
@@ -1270,6 +1270,33 @@ class MetaIntegration(models.Model):
 
     def __str__(self):
         return f"{self.company.name} - Meta Ads"
+
+
+
+class MetaPage(models.Model):
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="meta_pages")
+    meta_integration = models.ForeignKey(MetaIntegration, on_delete=models.CASCADE, related_name="pages")
+
+    page_id = models.CharField(max_length=255, db_index=True)
+    page_name = models.CharField(max_length=255, blank=True, default="")
+    page_access_token = models.TextField(blank=True, null=True)
+
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["company", "page_id"],
+                name="unique_company_facebook_page"
+            )
+        ]
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.page_name or self.page_id} ({self.company.name})"
 
 
 
