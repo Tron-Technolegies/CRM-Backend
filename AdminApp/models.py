@@ -1299,6 +1299,14 @@ class MetaPage(models.Model):
         default=SUBSCRIPTION_PENDING,
     )
 
+    # Short safe error code — never a token or raw API message.
+    # Examples: 'permission_denied', 'network_error', 'api_error', 'no_token'
+    webhook_subscription_error = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+    )
+
     is_active = models.BooleanField(default=True)
 
     created_at = models.DateTimeField(auto_now_add=True)

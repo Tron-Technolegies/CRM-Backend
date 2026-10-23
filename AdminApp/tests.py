@@ -517,7 +517,7 @@ class StaffInvitationAndLoginFlowTest(TestCase):
         self.assertIsNotNone(staff.invitation_token)
         token_str = str(staff.invitation_token)
         self.assertIn(token_str, html_content)
-        self.assertIn("http://localhost:5173/staff/accept-invitation/?token=", html_content)
+        self.assertIn(f"{settings.FRONTEND_URL}/staff/accept-invitation/?token=", html_content)
 
         # 3. Before accepting, staff cannot log in
         early_login_resp = self.client.post(
@@ -2306,6 +2306,8 @@ class MetaAdsIntegrationTests(TestCase):
         # Subscription status fields must be present
         self.assertIn("webhookSubscriptionStatus", data["pages"][0])
         self.assertIn("webhook_subscription_status", data["pages"][0])
+        self.assertIn("webhookSubscriptionError", data["pages"][0])
+        self.assertIn("webhook_subscription_error", data["pages"][0])
         self.assertIn("hasPageToken", data["pages"][0])
 
         # Security check: tokens must never be returned in response
@@ -2480,6 +2482,7 @@ class MetaAdsIntegrationTests(TestCase):
 
         page = MetaPage.objects.get(company=self.company_a, page_id="page_perm_err")
         self.assertEqual(page.webhook_subscription_status, MetaPage.SUBSCRIPTION_FAILED)
+        self.assertEqual(page.webhook_subscription_error, "permission_denied")
         self.assertTrue(page.is_active)
 
     # 24. Page with no page_access_token: subscription marked as no_token
@@ -2525,6 +2528,7 @@ class MetaAdsIntegrationTests(TestCase):
 
         page = MetaPage.objects.get(company=self.company_a, page_id="page_no_tok")
         self.assertEqual(page.webhook_subscription_status, MetaPage.SUBSCRIPTION_NO_TOKEN)
+        self.assertEqual(page.webhook_subscription_error, "no_token")
 
     # 25. One page fails subscription, other succeeds — OAuth still completes
     @patch("requests.post")
@@ -2626,6 +2630,7 @@ class MetaAdsIntegrationTests(TestCase):
 
         page = MetaPage.objects.get(company=self.company_a, page_id="page_timeout")
         self.assertEqual(page.webhook_subscription_status, MetaPage.SUBSCRIPTION_FAILED)
+        self.assertEqual(page.webhook_subscription_error, "network_error")
         self.assertTrue(page.is_active)
 
     # 27. Retry idempotency: reconnecting updates subscription status without creating duplicates
@@ -2710,5 +2715,7 @@ class MetaAdsIntegrationTests(TestCase):
             self.assertNotIn("page_access_token", p)
             self.assertIn("webhookSubscriptionStatus", p)
             self.assertIsInstance(p["webhookSubscriptionStatus"], str)
+            self.assertIn("webhookSubscriptionError", p)
+            self.assertIsInstance(p["webhookSubscriptionError"], str)
             self.assertIn("hasPageToken", p)
             self.assertIsInstance(p["hasPageToken"], bool)

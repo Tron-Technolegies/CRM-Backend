@@ -583,23 +583,22 @@ def subscribe_page_to_leadgen_webhook(page_id, page_access_token):
         subscribed_fields=leadgen
         access_token={page_access_token}
 
-    Returns one of:
-        'subscribed'  - Meta confirmed the subscription.
-        'failed'      - Meta returned an error or the HTTP request failed.
-        'no_token'    - No usable page access token; subscription not attempted.
+    Returns (status, error_code) where:
+        status     - MetaPage.SUBSCRIPTION_* constant string
+        error_code - short safe string for frontend display, or '' on success
 
     Tokens are NEVER written to logs. Only page_id and error codes are logged.
     """
     if not page_id:
         logger.warning("subscribe_page_to_leadgen_webhook: called with empty page_id")
-        return MetaPage.SUBSCRIPTION_FAILED
+        return MetaPage.SUBSCRIPTION_FAILED, "missing_page_id"
 
     if not page_access_token:
         logger.warning(
             "Meta webhook subscription not attempted for page_id=%s: no page access token available.",
             page_id,
         )
-        return MetaPage.SUBSCRIPTION_NO_TOKEN
+        return MetaPage.SUBSCRIPTION_NO_TOKEN, "no_token"
 
     try:
         resp = requests.post(
@@ -615,23 +614,37 @@ def subscribe_page_to_leadgen_webhook(page_id, page_access_token):
         logger.exception(
             "Meta webhook subscription network error for page_id=%s", page_id
         )
-        return MetaPage.SUBSCRIPTION_FAILED
+        return MetaPage.SUBSCRIPTION_FAILED, "network_error"
 
     if data.get("success") is True:
         logger.info(
             "Meta webhook subscription succeeded for page_id=%s", page_id
         )
-        return MetaPage.SUBSCRIPTION_SUCCESS
+        return MetaPage.SUBSCRIPTION_SUCCESS, ""
 
     err = data.get("error", {})
+    err_code = err.get("code")
+    err_subcode = err.get("error_subcode")
+    err_message = err.get("message", "")
     logger.error(
         "Meta webhook subscription failed for page_id=%s: code=%s subcode=%s message=%s",
         page_id,
-        err.get("code"),
-        err.get("error_subcode"),
-        err.get("message"),
+        err_code,
+        err_subcode,
+        err_message,
     )
-    return MetaPage.SUBSCRIPTION_FAILED
+
+    # Map known Graph API error codes to safe, human-readable error codes
+    if err_code == 200 or (err_message and "permission" in err_message.lower()):
+        safe_error = "permission_denied"
+    elif err_code in (190, 102, 467):
+        safe_error = "token_expired"
+    elif err_code == 100:
+        safe_error = "invalid_page_id"
+    else:
+        safe_error = f"api_error_{err_code}" if err_code else "api_error"
+
+    return MetaPage.SUBSCRIPTION_FAILED, safe_error
 
 
 @api_view(["GET"])
@@ -781,7 +794,7 @@ def meta_callback(request):
                 continue
 
             # Attempt subscription before saving so status is persisted atomically
-            subscription_status = subscribe_page_to_leadgen_webhook(
+            subscription_status, subscription_error = subscribe_page_to_leadgen_webhook(
                 page_id=str(p_id),
                 page_access_token=p_token,
             )
@@ -795,6 +808,7 @@ def meta_callback(request):
                     "page_access_token": p_token,
                     "is_active": True,
                     "webhook_subscription_status": subscription_status,
+                    "webhook_subscription_error": subscription_error,
                 }
             )
             subscription_results[str(p_id)] = subscription_status
@@ -857,6 +871,9 @@ def meta_status(request):
             # Webhook subscription status — string, never a token
             "webhookSubscriptionStatus": p.webhook_subscription_status,
             "webhook_subscription_status": p.webhook_subscription_status,
+            # Safe error code — '' on success, short slug on failure
+            "webhookSubscriptionError": p.webhook_subscription_error,
+            "webhook_subscription_error": p.webhook_subscription_error,
             "hasPageToken": bool(p.page_access_token),
         }
         for p in active_pages
