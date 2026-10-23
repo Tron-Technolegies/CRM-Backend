@@ -1687,8 +1687,14 @@ class MetaAdsIntegrationTests(TestCase):
             )
 
     # 4. OAuth callback saving multiple Pages (with pagination)
+    @patch("requests.post")
     @patch("requests.get")
-    def test_oauth_callback_saving_multiple_pages(self, mock_get):
+    def test_oauth_callback_saving_multiple_pages(self, mock_get, mock_post):
+        # Subscription call should succeed for all pages
+        sub_resp = MagicMock()
+        sub_resp.json.return_value = {"success": True}
+        mock_post.return_value = sub_resp
+
         state = signing.dumps(
             {"company_id": self.company_a.id, "staff_id": self.staff_a.id},
             salt="meta-oauth",
@@ -1746,6 +1752,10 @@ class MetaAdsIntegrationTests(TestCase):
         p1 = MetaPage.objects.get(company=self.company_a, page_id="page_3001")
         self.assertEqual(p1.page_name, "Brand A Page")
         self.assertEqual(p1.page_access_token, "token_3001")
+        # Verify subscription status was persisted
+        self.assertEqual(p1.webhook_subscription_status, MetaPage.SUBSCRIPTION_SUCCESS)
+        # Confirm requests.post was called for each page
+        self.assertEqual(mock_post.call_count, 2)
 
     # 5. Correct Page-to-company identification
     def test_page_to_company_identification(self):
@@ -2076,8 +2086,12 @@ class MetaAdsIntegrationTests(TestCase):
         self.assertFalse(Lead.objects.filter(company=self.company_a, meta_lead_id="lead_comp_b_105").exists())
 
     # 17. OAuth callback with empty pages (user has no pages or didn't grant permission)
+    @patch("requests.post")
     @patch("requests.get")
-    def test_oauth_callback_with_empty_pages(self, mock_get):
+    def test_oauth_callback_with_empty_pages(self, mock_get, mock_post):
+        # No pages => subscription never called
+        mock_post.return_value = MagicMock()
+
         state = signing.dumps(
             {"company_id": self.company_a.id, "staff_id": self.staff_a.id},
             salt="meta-oauth",
@@ -2122,6 +2136,9 @@ class MetaAdsIntegrationTests(TestCase):
         active_pages = MetaPage.objects.filter(company=self.company_a, is_active=True)
         self.assertEqual(active_pages.count(), 0)
 
+        # Subscription never called when there are no pages
+        mock_post.assert_not_called()
+
         # Status endpoint should report connected=True, but hasConnectedPage=False
         token_a = str(RefreshToken.for_user(self.user_a).access_token)
         status_resp = self.client.get(
@@ -2138,8 +2155,11 @@ class MetaAdsIntegrationTests(TestCase):
         self.assertEqual(data["pages"], [])
 
     # 18. OAuth callback handling Graph API error on pages request
+    @patch("requests.post")
     @patch("requests.get")
-    def test_oauth_callback_pages_api_error(self, mock_get):
+    def test_oauth_callback_pages_api_error(self, mock_get, mock_post):
+        mock_post.return_value = MagicMock()
+
         state = signing.dumps(
             {"company_id": self.company_a.id, "staff_id": self.staff_a.id},
             salt="meta-oauth",
@@ -2174,8 +2194,13 @@ class MetaAdsIntegrationTests(TestCase):
             self.assertIn("reason=pages_failed", resp.url)
 
     # 19. OAuth callback discovers page via granular_scopes target_ids (New Pages Experience)
+    @patch("requests.post")
     @patch("requests.get")
-    def test_oauth_callback_granular_scopes_page_discovery(self, mock_get):
+    def test_oauth_callback_granular_scopes_page_discovery(self, mock_get, mock_post):
+        sub_resp = MagicMock()
+        sub_resp.json.return_value = {"success": True}
+        mock_post.return_value = sub_resp
+
         state = signing.dumps(
             {"company_id": self.company_a.id, "staff_id": self.staff_a.id},
             salt="meta-oauth",
@@ -2234,6 +2259,7 @@ class MetaAdsIntegrationTests(TestCase):
         self.assertEqual(saved_page.page_name, "Tron Technologies")
         self.assertEqual(saved_page.page_access_token, "token_page_4001")
         self.assertTrue(saved_page.is_active)
+        self.assertEqual(saved_page.webhook_subscription_status, MetaPage.SUBSCRIPTION_SUCCESS)
 
         # Verify integration primary page is set
         integration = MetaIntegration.objects.get(company=self.company_a)
@@ -2277,6 +2303,10 @@ class MetaAdsIntegrationTests(TestCase):
         self.assertEqual(len(data["pages"]), 2)
         self.assertIn("pageId", data["pages"][0])
         self.assertIn("pageName", data["pages"][0])
+        # Subscription status fields must be present
+        self.assertIn("webhookSubscriptionStatus", data["pages"][0])
+        self.assertIn("webhook_subscription_status", data["pages"][0])
+        self.assertIn("hasPageToken", data["pages"][0])
 
         # Security check: tokens must never be returned in response
         self.assertNotIn("access_token", data)
@@ -2348,5 +2378,337 @@ class MetaAdsIntegrationTests(TestCase):
         self.assertNotIn("page_2001", page_ids_a)
         self.assertNotIn("page_1001", page_ids_b)
 
+    # ---------------------------------------------------------------------------
+    # Webhook subscription-specific tests (new)
+    # ---------------------------------------------------------------------------
 
+    # 22. Successful subscription: Graph API returns {"success": true}
+    @patch("requests.post")
+    @patch("requests.get")
+    def test_subscription_success(self, mock_get, mock_post):
+        sub_resp = MagicMock()
+        sub_resp.json.return_value = {"success": True}
+        mock_post.return_value = sub_resp
 
+        state = signing.dumps(
+            {"company_id": self.company_a.id, "staff_id": self.staff_a.id},
+            salt="meta-oauth",
+        )
+
+        token_resp = MagicMock()
+        token_resp.json.return_value = {"access_token": "user_tok"}
+        me_resp = MagicMock()
+        me_resp.json.return_value = {"id": "u1", "name": "User"}
+        ad_resp = MagicMock()
+        ad_resp.json.return_value = {"data": []}
+        page_resp = MagicMock()
+        page_resp.json.return_value = {
+            "data": [{"id": "page_sub_ok", "name": "Sub OK Page", "access_token": "ptoken_ok"}],
+            "paging": {},
+        }
+        debug_resp = MagicMock()
+        debug_resp.json.return_value = {"data": {"granular_scopes": []}}
+
+        mock_get.side_effect = [token_resp, me_resp, ad_resp, page_resp, debug_resp]
+
+        with override_settings(
+            META_APP_ID="app123", META_APP_SECRET="sec123",
+            META_REDIRECT_URI="https://backend/callback/",
+            FRONTEND_URL="https://tron-crm.netlify.app",
+        ):
+            resp = self.client.get(
+                f"/api/admin/integrations/meta/callback/?code=c&state={state}"
+            )
+        self.assertIn("meta=connected", resp.url)
+
+        page = MetaPage.objects.get(company=self.company_a, page_id="page_sub_ok")
+        self.assertEqual(page.webhook_subscription_status, MetaPage.SUBSCRIPTION_SUCCESS)
+
+        # POST was called with the correct URL pattern (no token in assertion)
+        call_args = mock_post.call_args
+        self.assertIn("page_sub_ok", call_args[0][0])
+        self.assertIn("subscribed_apps", call_args[0][0])
+        self.assertEqual(call_args[1]["params"]["subscribed_fields"], "leadgen")
+
+    # 23. Graph API permission error: subscription marked as failed
+    @patch("requests.post")
+    @patch("requests.get")
+    def test_subscription_permission_error(self, mock_get, mock_post):
+        sub_err_resp = MagicMock()
+        sub_err_resp.json.return_value = {
+            "error": {
+                "message": "(#200) The current user is not allowed to manage subscriptions.",
+                "type": "OAuthException",
+                "code": 200,
+                "error_subcode": 1404121,
+            }
+        }
+        mock_post.return_value = sub_err_resp
+
+        state = signing.dumps(
+            {"company_id": self.company_a.id, "staff_id": self.staff_a.id},
+            salt="meta-oauth",
+        )
+
+        token_resp = MagicMock()
+        token_resp.json.return_value = {"access_token": "user_tok"}
+        me_resp = MagicMock()
+        me_resp.json.return_value = {"id": "u1", "name": "User"}
+        ad_resp = MagicMock()
+        ad_resp.json.return_value = {"data": []}
+        page_resp = MagicMock()
+        page_resp.json.return_value = {
+            "data": [{"id": "page_perm_err", "name": "Perm Err Page", "access_token": "ptoken_perm"}],
+            "paging": {},
+        }
+        debug_resp = MagicMock()
+        debug_resp.json.return_value = {"data": {"granular_scopes": []}}
+
+        mock_get.side_effect = [token_resp, me_resp, ad_resp, page_resp, debug_resp]
+
+        with override_settings(
+            META_APP_ID="app123", META_APP_SECRET="sec123",
+            META_REDIRECT_URI="https://backend/callback/",
+            FRONTEND_URL="https://tron-crm.netlify.app",
+        ):
+            resp = self.client.get(
+                f"/api/admin/integrations/meta/callback/?code=c&state={state}"
+            )
+
+        # OAuth flow must still complete — only subscription status reflects the failure
+        self.assertIn("meta=connected", resp.url)
+
+        page = MetaPage.objects.get(company=self.company_a, page_id="page_perm_err")
+        self.assertEqual(page.webhook_subscription_status, MetaPage.SUBSCRIPTION_FAILED)
+        self.assertTrue(page.is_active)
+
+    # 24. Page with no page_access_token: subscription marked as no_token
+    @patch("requests.post")
+    @patch("requests.get")
+    def test_subscription_no_token(self, mock_get, mock_post):
+        """If Meta does not return a page_access_token, subscription must NOT be attempted."""
+        mock_post.return_value = MagicMock()
+
+        state = signing.dumps(
+            {"company_id": self.company_a.id, "staff_id": self.staff_a.id},
+            salt="meta-oauth",
+        )
+
+        token_resp = MagicMock()
+        token_resp.json.return_value = {"access_token": "user_tok"}
+        me_resp = MagicMock()
+        me_resp.json.return_value = {"id": "u1", "name": "User"}
+        ad_resp = MagicMock()
+        ad_resp.json.return_value = {"data": []}
+        # Note: no access_token field in the page object
+        page_resp = MagicMock()
+        page_resp.json.return_value = {
+            "data": [{"id": "page_no_tok", "name": "No Token Page"}],
+            "paging": {},
+        }
+        debug_resp = MagicMock()
+        debug_resp.json.return_value = {"data": {"granular_scopes": []}}
+
+        mock_get.side_effect = [token_resp, me_resp, ad_resp, page_resp, debug_resp]
+
+        with override_settings(
+            META_APP_ID="app123", META_APP_SECRET="sec123",
+            META_REDIRECT_URI="https://backend/callback/",
+            FRONTEND_URL="https://tron-crm.netlify.app",
+        ):
+            self.client.get(
+                f"/api/admin/integrations/meta/callback/?code=c&state={state}"
+            )
+
+        # requests.post must never be called when there is no page token
+        mock_post.assert_not_called()
+
+        page = MetaPage.objects.get(company=self.company_a, page_id="page_no_tok")
+        self.assertEqual(page.webhook_subscription_status, MetaPage.SUBSCRIPTION_NO_TOKEN)
+
+    # 25. One page fails subscription, other succeeds — OAuth still completes
+    @patch("requests.post")
+    @patch("requests.get")
+    def test_partial_subscription_failure(self, mock_get, mock_post):
+        """A failure for one page must not block the subscription of other pages."""
+        ok_resp = MagicMock()
+        ok_resp.json.return_value = {"success": True}
+        err_resp = MagicMock()
+        err_resp.json.return_value = {
+            "error": {"message": "Permission denied", "code": 200}
+        }
+        mock_post.side_effect = [err_resp, ok_resp]
+
+        state = signing.dumps(
+            {"company_id": self.company_a.id, "staff_id": self.staff_a.id},
+            salt="meta-oauth",
+        )
+
+        token_resp = MagicMock()
+        token_resp.json.return_value = {"access_token": "user_tok"}
+        me_resp = MagicMock()
+        me_resp.json.return_value = {"id": "u1", "name": "User"}
+        ad_resp = MagicMock()
+        ad_resp.json.return_value = {"data": []}
+        page_resp = MagicMock()
+        page_resp.json.return_value = {
+            "data": [
+                {"id": "page_fail_sub", "name": "Fail Sub",   "access_token": "tok_fail"},
+                {"id": "page_ok_sub",   "name": "Success Sub", "access_token": "tok_ok"},
+            ],
+            "paging": {},
+        }
+        debug_resp = MagicMock()
+        debug_resp.json.return_value = {"data": {"granular_scopes": []}}
+
+        mock_get.side_effect = [token_resp, me_resp, ad_resp, page_resp, debug_resp]
+
+        with override_settings(
+            META_APP_ID="app123", META_APP_SECRET="sec123",
+            META_REDIRECT_URI="https://backend/callback/",
+            FRONTEND_URL="https://tron-crm.netlify.app",
+        ):
+            resp = self.client.get(
+                f"/api/admin/integrations/meta/callback/?code=c&state={state}"
+            )
+
+        self.assertIn("meta=connected", resp.url)
+
+        fail_page = MetaPage.objects.get(company=self.company_a, page_id="page_fail_sub")
+        ok_page   = MetaPage.objects.get(company=self.company_a, page_id="page_ok_sub")
+        self.assertEqual(fail_page.webhook_subscription_status, MetaPage.SUBSCRIPTION_FAILED)
+        self.assertEqual(ok_page.webhook_subscription_status,   MetaPage.SUBSCRIPTION_SUCCESS)
+        # Both pages must still be active in the CRM
+        self.assertTrue(fail_page.is_active)
+        self.assertTrue(ok_page.is_active)
+        # Both subscription POSTs were attempted
+        self.assertEqual(mock_post.call_count, 2)
+
+    # 26. Network/timeout error on subscription: marked as failed, OAuth unaffected
+    @patch("requests.post")
+    @patch("requests.get")
+    def test_subscription_network_error(self, mock_get, mock_post):
+        import requests as req_lib
+        mock_post.side_effect = req_lib.RequestException("Connection timed out")
+
+        state = signing.dumps(
+            {"company_id": self.company_a.id, "staff_id": self.staff_a.id},
+            salt="meta-oauth",
+        )
+
+        token_resp = MagicMock()
+        token_resp.json.return_value = {"access_token": "user_tok"}
+        me_resp = MagicMock()
+        me_resp.json.return_value = {"id": "u1", "name": "User"}
+        ad_resp = MagicMock()
+        ad_resp.json.return_value = {"data": []}
+        page_resp = MagicMock()
+        page_resp.json.return_value = {
+            "data": [{"id": "page_timeout", "name": "Timeout Page", "access_token": "tok_x"}],
+            "paging": {},
+        }
+        debug_resp = MagicMock()
+        debug_resp.json.return_value = {"data": {"granular_scopes": []}}
+
+        mock_get.side_effect = [token_resp, me_resp, ad_resp, page_resp, debug_resp]
+
+        with override_settings(
+            META_APP_ID="app123", META_APP_SECRET="sec123",
+            META_REDIRECT_URI="https://backend/callback/",
+            FRONTEND_URL="https://tron-crm.netlify.app",
+        ):
+            resp = self.client.get(
+                f"/api/admin/integrations/meta/callback/?code=c&state={state}"
+            )
+
+        # OAuth must complete — subscription failure must not abort the flow
+        self.assertIn("meta=connected", resp.url)
+
+        page = MetaPage.objects.get(company=self.company_a, page_id="page_timeout")
+        self.assertEqual(page.webhook_subscription_status, MetaPage.SUBSCRIPTION_FAILED)
+        self.assertTrue(page.is_active)
+
+    # 27. Retry idempotency: reconnecting updates subscription status without creating duplicates
+    @patch("requests.post")
+    @patch("requests.get")
+    def test_subscription_retry_idempotency(self, mock_get, mock_post):
+        """Reconnecting Meta for the same page retries subscription and updates the status."""
+        # First connect: subscription fails
+        fail_resp = MagicMock()
+        fail_resp.json.return_value = {"error": {"message": "Temporary error", "code": 2}}
+        ok_resp = MagicMock()
+        ok_resp.json.return_value = {"success": True}
+
+        state = signing.dumps(
+            {"company_id": self.company_a.id, "staff_id": self.staff_a.id},
+            salt="meta-oauth",
+        )
+
+        def make_get_side_effects(token="user_tok"):
+            token_r = MagicMock(); token_r.json.return_value = {"access_token": token}
+            me_r    = MagicMock(); me_r.json.return_value    = {"id": "u1", "name": "User"}
+            ad_r    = MagicMock(); ad_r.json.return_value    = {"data": []}
+            pg_r    = MagicMock(); pg_r.json.return_value    = {
+                "data": [{"id": "page_retry", "name": "Retry Page", "access_token": "ptoken_retry"}],
+                "paging": {},
+            }
+            dbg_r   = MagicMock(); dbg_r.json.return_value   = {"data": {"granular_scopes": []}}
+            return [token_r, me_r, ad_r, pg_r, dbg_r]
+
+        settings_override = dict(
+            META_APP_ID="app123", META_APP_SECRET="sec123",
+            META_REDIRECT_URI="https://backend/callback/",
+            FRONTEND_URL="https://tron-crm.netlify.app",
+        )
+
+        # First connect
+        mock_post.return_value = fail_resp
+        mock_get.side_effect = make_get_side_effects()
+        with override_settings(**settings_override):
+            self.client.get(f"/api/admin/integrations/meta/callback/?code=c1&state={state}")
+
+        page = MetaPage.objects.get(company=self.company_a, page_id="page_retry")
+        self.assertEqual(page.webhook_subscription_status, MetaPage.SUBSCRIPTION_FAILED)
+
+        # Second connect (retry) — subscription succeeds this time
+        state2 = signing.dumps(
+            {"company_id": self.company_a.id, "staff_id": self.staff_a.id},
+            salt="meta-oauth",
+        )
+        mock_post.return_value = ok_resp
+        mock_get.side_effect = make_get_side_effects("user_tok_2")
+        with override_settings(**settings_override):
+            self.client.get(f"/api/admin/integrations/meta/callback/?code=c2&state={state2}")
+
+        page.refresh_from_db()
+        self.assertEqual(page.webhook_subscription_status, MetaPage.SUBSCRIPTION_SUCCESS)
+        # Must still be exactly one MetaPage row for this page
+        self.assertEqual(
+            MetaPage.objects.filter(company=self.company_a, page_id="page_retry").count(), 1
+        )
+
+    # 28. No token leakage in API responses or logs
+    def test_no_token_leakage_in_status_response(self):
+        """Tokens must never appear in the meta_status API response."""
+        token_a = str(RefreshToken.for_user(self.user_a).access_token)
+        resp = self.client.get(
+            "/api/admin/integrations/meta/status/",
+            HTTP_AUTHORIZATION=f"Bearer {token_a}"
+        )
+        self.assertEqual(resp.status_code, 200)
+        raw = resp.content.decode("utf-8")
+
+        # Raw token strings must not appear anywhere in the JSON body
+        self.assertNotIn("EAAB_test_user_token", raw)
+        self.assertNotIn("EAAB_test_page_token_1001", raw)
+        self.assertNotIn("EAAB_test_page_token_1002", raw)
+
+        # Ensure subscription status fields are booleans/strings, never raw tokens
+        data = resp.json()
+        for p in data["pages"]:
+            self.assertNotIn("access_token", p)
+            self.assertNotIn("page_access_token", p)
+            self.assertIn("webhookSubscriptionStatus", p)
+            self.assertIsInstance(p["webhookSubscriptionStatus"], str)
+            self.assertIn("hasPageToken", p)
+            self.assertIsInstance(p["hasPageToken"], bool)

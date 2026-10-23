@@ -575,6 +575,65 @@ def retrieve_facebook_pages(access_token):
     return pages, None
 
 
+def subscribe_page_to_leadgen_webhook(page_id, page_access_token):
+    """
+    Subscribe a single Facebook Page to the Meta app's 'leadgen' webhook field.
+
+    Calls POST /{page_id}/subscribed_apps with:
+        subscribed_fields=leadgen
+        access_token={page_access_token}
+
+    Returns one of:
+        'subscribed'  - Meta confirmed the subscription.
+        'failed'      - Meta returned an error or the HTTP request failed.
+        'no_token'    - No usable page access token; subscription not attempted.
+
+    Tokens are NEVER written to logs. Only page_id and error codes are logged.
+    """
+    if not page_id:
+        logger.warning("subscribe_page_to_leadgen_webhook: called with empty page_id")
+        return MetaPage.SUBSCRIPTION_FAILED
+
+    if not page_access_token:
+        logger.warning(
+            "Meta webhook subscription not attempted for page_id=%s: no page access token available.",
+            page_id,
+        )
+        return MetaPage.SUBSCRIPTION_NO_TOKEN
+
+    try:
+        resp = requests.post(
+            f"https://graph.facebook.com/v24.0/{page_id}/subscribed_apps",
+            params={
+                "subscribed_fields": "leadgen",
+                "access_token": page_access_token,
+            },
+            timeout=30,
+        )
+        data = resp.json()
+    except requests.RequestException:
+        logger.exception(
+            "Meta webhook subscription network error for page_id=%s", page_id
+        )
+        return MetaPage.SUBSCRIPTION_FAILED
+
+    if data.get("success") is True:
+        logger.info(
+            "Meta webhook subscription succeeded for page_id=%s", page_id
+        )
+        return MetaPage.SUBSCRIPTION_SUCCESS
+
+    err = data.get("error", {})
+    logger.error(
+        "Meta webhook subscription failed for page_id=%s: code=%s subcode=%s message=%s",
+        page_id,
+        err.get("code"),
+        err.get("error_subcode"),
+        err.get("message"),
+    )
+    return MetaPage.SUBSCRIPTION_FAILED
+
+
 @api_view(["GET"])
 @permission_classes([AllowAny])
 @authentication_classes([])
@@ -710,14 +769,22 @@ def meta_callback(request):
         new_page_ids = {str(p.get("id")) for p in pages if p.get("id")}
         MetaPage.objects.filter(company=company).exclude(page_id__in=new_page_ids).update(is_active=False)
 
-        # Save or update each authorized Facebook Page in MetaPage
+        # Save or update each authorized Facebook Page in MetaPage, then subscribe to leadgen webhook
         saved_page_count = 0
+        subscription_results = {}  # page_id -> status string, for logging only
+
         for p in pages:
             p_id = p.get("id")
             p_name = p.get("name") or ""
             p_token = p.get("access_token")
             if not p_id:
                 continue
+
+            # Attempt subscription before saving so status is persisted atomically
+            subscription_status = subscribe_page_to_leadgen_webhook(
+                page_id=str(p_id),
+                page_access_token=p_token,
+            )
 
             MetaPage.objects.update_or_create(
                 company=company,
@@ -727,13 +794,15 @@ def meta_callback(request):
                     "page_name": p_name,
                     "page_access_token": p_token,
                     "is_active": True,
+                    "webhook_subscription_status": subscription_status,
                 }
             )
+            subscription_results[str(p_id)] = subscription_status
             saved_page_count += 1
 
         logger.info(
-            "Meta integration saved successfully. company=%s created=%s pages_synced=%s",
-            company.id, created, saved_page_count
+            "Meta integration saved. company=%s created=%s pages_synced=%s subscription_results=%s",
+            company.id, created, saved_page_count, subscription_results
         )
 
         return redirect(f"{settings_page}?meta=connected")
@@ -785,6 +854,10 @@ def meta_status(request):
             "page_name": p.page_name,
             "isActive": p.is_active,
             "is_active": p.is_active,
+            # Webhook subscription status — string, never a token
+            "webhookSubscriptionStatus": p.webhook_subscription_status,
+            "webhook_subscription_status": p.webhook_subscription_status,
+            "hasPageToken": bool(p.page_access_token),
         }
         for p in active_pages
     ]

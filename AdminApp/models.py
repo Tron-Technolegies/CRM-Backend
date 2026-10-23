@@ -1277,9 +1277,27 @@ class MetaPage(models.Model):
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="meta_pages")
     meta_integration = models.ForeignKey(MetaIntegration, on_delete=models.CASCADE, related_name="pages")
 
+    SUBSCRIPTION_PENDING = "pending"
+    SUBSCRIPTION_SUCCESS = "subscribed"
+    SUBSCRIPTION_FAILED = "failed"
+    SUBSCRIPTION_NO_TOKEN = "no_token"
+
+    SUBSCRIPTION_STATUS_CHOICES = [
+        (SUBSCRIPTION_PENDING, "Pending"),
+        (SUBSCRIPTION_SUCCESS, "Subscribed"),
+        (SUBSCRIPTION_FAILED, "Failed"),
+        (SUBSCRIPTION_NO_TOKEN, "No Token — Not Attempted"),
+    ]
+
     page_id = models.CharField(max_length=255, db_index=True)
     page_name = models.CharField(max_length=255, blank=True, default="")
     page_access_token = models.TextField(blank=True, null=True)
+
+    webhook_subscription_status = models.CharField(
+        max_length=20,
+        choices=SUBSCRIPTION_STATUS_CHOICES,
+        default=SUBSCRIPTION_PENDING,
+    )
 
     is_active = models.BooleanField(default=True)
 
