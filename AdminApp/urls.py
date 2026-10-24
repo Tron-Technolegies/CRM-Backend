@@ -163,6 +163,7 @@ urlpatterns= [
     path("integrations/meta/disconnect/", views.meta_disconnect, name="meta_disconnect"),
     path('integrations/meta/callback/', views.meta_callback, name='meta-callback'),
     path('webhooks/meta/', views.meta_webhook, name='meta-webhook'),
+    path('webhooks/meta', views.meta_webhook, name='meta-webhook-noslash'),
     path('integrations/meta/status/', views.meta_status, name='meta-status'),
 
     path('calls/dial-out/', views.dial_out, name='call-dial-out'),

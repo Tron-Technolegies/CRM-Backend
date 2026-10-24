@@ -1105,13 +1105,17 @@ def process_meta_lead(leadgen_id, page_id, form_id=None, ad_id=None):
 @permission_classes([AllowAny])
 @authentication_classes([])
 def meta_webhook(request):
+    logger.info(
+        "Meta webhook request received: method=%s path=%s content_type=%s",
+        request.method, request.path, request.content_type,
+    )
     if request.method == "GET":
         mode = request.GET.get("hub.mode")
         token = request.GET.get("hub.verify_token")
         challenge = request.GET.get("hub.challenge")
 
         if mode == "subscribe" and token == settings.META_WEBHOOK_VERIFY_TOKEN:
-            logger.info("Meta webhook verified successfully")
+            logger.info("Meta webhook GET verification succeeded")
             return HttpResponse(challenge, content_type="text/plain", status=200)
 
         logger.warning(
@@ -1122,6 +1126,7 @@ def meta_webhook(request):
 
     if request.method == "POST":
         signature = request.headers.get("X-Hub-Signature-256", "")
+        has_signature = bool(signature)
 
         if settings.META_APP_SECRET:
             expected = "sha256=" + hmac.new(
@@ -1131,30 +1136,45 @@ def meta_webhook(request):
             ).hexdigest()
 
             if not hmac.compare_digest(expected, signature):
-                logger.warning("Meta webhook signature mismatch")
-                return HttpResponse(status=403)
+                logger.warning(
+                    "Meta webhook POST signature mismatch: has_header=%s",
+                    has_signature,
+                )
+                return HttpResponse("Signature mismatch", status=403)
 
         try:
             payload = json.loads(request.body.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
             logger.warning("Meta webhook: could not parse JSON body")
-            return HttpResponse(status=400)
+            return HttpResponse("Invalid JSON", status=400)
 
-        logger.info("Meta webhook event received: object=%s", payload.get("object"))
+        obj_type = payload.get("object")
+        entries = payload.get("entry", [])
+        entry_count = len(entries) if isinstance(entries, list) else 0
+        logger.info(
+            "Meta webhook POST payload parsed: object=%s entries=%s",
+            obj_type, entry_count,
+        )
 
-        if payload.get("object") != "page":
+        if obj_type != "page":
+            logger.info("Meta webhook ignored non-page object: %s", obj_type)
             return HttpResponse(status=200)
 
-        entries = payload.get("entry", [])
         if not isinstance(entries, list):
             return HttpResponse(status=200)
 
         has_recoverable_error = False
+        processed_count = 0
         for entry in entries:
             entry_page_id = str(entry.get("id") or "")
             changes = entry.get("changes", [])
             for change in changes:
-                if change.get("field") != "leadgen":
+                field_name = change.get("field")
+                if field_name != "leadgen":
+                    logger.info(
+                        "Meta webhook skipped non-leadgen field=%s for page_id=%s",
+                        field_name, entry_page_id,
+                    )
                     continue
 
                 value = change.get("value", {})
@@ -1163,14 +1183,29 @@ def meta_webhook(request):
                 form_id = value.get("form_id")
                 ad_id = value.get("ad_id")
 
+                logger.info(
+                    "Processing Meta leadgen event: page_id=%s leadgen_id=%s form_id=%s ad_id=%s",
+                    page_id, leadgen_id, form_id, ad_id,
+                )
+
                 success, reason = process_meta_lead(
                     leadgen_id=leadgen_id,
                     page_id=page_id,
                     form_id=form_id,
                     ad_id=ad_id,
                 )
+                logger.info(
+                    "Meta leadgen event result: leadgen_id=%s success=%s reason=%s",
+                    leadgen_id, success, reason,
+                )
+                processed_count += 1
                 if not success and reason == "network_error":
                     has_recoverable_error = True
+
+        logger.info(
+            "Meta webhook POST processing complete: processed_count=%s recoverable_error=%s",
+            processed_count, has_recoverable_error,
+        )
 
         if has_recoverable_error:
             return HttpResponse("Temporary Graph API error", status=500)
