@@ -2719,3 +2719,42 @@ class MetaAdsIntegrationTests(TestCase):
             self.assertIsInstance(p["webhookSubscriptionError"], str)
             self.assertIn("hasPageToken", p)
             self.assertIsInstance(p["hasPageToken"], bool)
+
+    # 30. Meta OAuth connect includes pages_manage_metadata and all required scopes
+    def test_meta_connect_scope_includes_pages_manage_metadata(self):
+        token_a = str(RefreshToken.for_user(self.user_a).access_token)
+        resp = self.client.get(
+            "/api/admin/integrations/meta/connect/",
+            HTTP_AUTHORIZATION=f"Bearer {token_a}"
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("auth_url", data)
+        auth_url = data["auth_url"]
+
+        parsed = urlparse(auth_url)
+        params = parse_qs(parsed.query)
+
+        self.assertIn("scope", params)
+        scope_str = params["scope"][0]
+        scopes = set(scope_str.split(","))
+
+        required_scopes = {
+            "public_profile",
+            "email",
+            "ads_management",
+            "ads_read",
+            "pages_show_list",
+            "pages_read_engagement",
+            "pages_manage_metadata",
+            "pages_manage_ads",
+            "leads_retrieval",
+        }
+        self.assertTrue(required_scopes.issubset(scopes))
+        self.assertIn("pages_manage_metadata", scopes)
+
+        # Verify state is valid and unpacks to company_a
+        self.assertIn("state", params)
+        state_data = signing.loads(params["state"][0], salt="meta-oauth")
+        self.assertEqual(state_data["company_id"], self.company_a.id)
+        self.assertEqual(state_data["staff_id"], self.staff_a.id)

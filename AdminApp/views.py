@@ -457,12 +457,13 @@ def meta_connect(request):
     params = {
         "client_id": settings.META_APP_ID,
         "redirect_uri": settings.META_REDIRECT_URI,
-        "scope":(
-                    "public_profile,email,"
-                    "ads_management,ads_read,"
-                    "pages_show_list,pages_read_engagement,"
-                    "pages_manage_ads,leads_retrieval"
-                ),
+        "scope": (
+            "public_profile,email,"
+            "ads_management,ads_read,"
+            "pages_show_list,pages_read_engagement,"
+            "pages_manage_metadata,pages_manage_ads,"
+            "leads_retrieval"
+        ),
         "state": state,
         "response_type": "code",
     }
@@ -551,7 +552,13 @@ def retrieve_facebook_pages(access_token):
             granular = debug_data.get("granular_scopes", [])
             target_page_ids = set()
             for s in granular:
-                if s.get("scope") in ["pages_show_list", "pages_read_engagement", "pages_manage_ads", "leads_retrieval"]:
+                if s.get("scope") in [
+                    "pages_show_list",
+                    "pages_read_engagement",
+                    "pages_manage_metadata",
+                    "pages_manage_ads",
+                    "leads_retrieval",
+                ]:
                     for tid in s.get("target_ids", []):
                         if tid and str(tid) not in seen_page_ids:
                             target_page_ids.add(str(tid))
