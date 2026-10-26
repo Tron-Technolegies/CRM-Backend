@@ -1115,12 +1115,12 @@ def meta_webhook(request):
         challenge = request.GET.get("hub.challenge")
 
         if mode == "subscribe" and token == settings.META_WEBHOOK_VERIFY_TOKEN:
-            logger.info("Meta webhook GET verification succeeded")
+            logger.info("Meta webhook GET verification succeeded: route=%s status=200", request.path)
             return HttpResponse(challenge, content_type="text/plain", status=200)
 
         logger.warning(
-            "Meta webhook verification failed: mode=%s token_match=%s",
-            mode, token == settings.META_WEBHOOK_VERIFY_TOKEN
+            "Meta webhook verification failed: route=%s mode=%s token_match=%s status=403",
+            request.path, mode, token == settings.META_WEBHOOK_VERIFY_TOKEN
         )
         return HttpResponse("Verification token mismatch", status=403)
 
@@ -1137,27 +1137,32 @@ def meta_webhook(request):
 
             if not hmac.compare_digest(expected, signature):
                 logger.warning(
-                    "Meta webhook POST signature mismatch: has_header=%s",
-                    has_signature,
+                    "Meta webhook POST signature mismatch: route=%s has_header=%s status=403",
+                    request.path, has_signature,
                 )
                 return HttpResponse("Signature mismatch", status=403)
+
+            logger.info(
+                "Meta webhook POST signature verified successfully: route=%s has_header=%s",
+                request.path, has_signature,
+            )
 
         try:
             payload = json.loads(request.body.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
-            logger.warning("Meta webhook: could not parse JSON body")
+            logger.warning("Meta webhook: could not parse JSON body: route=%s status=400", request.path)
             return HttpResponse("Invalid JSON", status=400)
 
         obj_type = payload.get("object")
         entries = payload.get("entry", [])
         entry_count = len(entries) if isinstance(entries, list) else 0
         logger.info(
-            "Meta webhook POST payload parsed: object=%s entries=%s",
-            obj_type, entry_count,
+            "Meta webhook POST payload parsed: route=%s object=%s entries=%s",
+            request.path, obj_type, entry_count,
         )
 
         if obj_type != "page":
-            logger.info("Meta webhook ignored non-page object: %s", obj_type)
+            logger.info("Meta webhook ignored non-page object: %s route=%s status=200", obj_type, request.path)
             return HttpResponse(status=200)
 
         if not isinstance(entries, list):
@@ -1203,8 +1208,8 @@ def meta_webhook(request):
                     has_recoverable_error = True
 
         logger.info(
-            "Meta webhook POST processing complete: processed_count=%s recoverable_error=%s",
-            processed_count, has_recoverable_error,
+            "Meta webhook POST processing complete: route=%s processed_count=%s recoverable_error=%s response_status=%s",
+            request.path, processed_count, has_recoverable_error, 500 if has_recoverable_error else 200,
         )
 
         if has_recoverable_error:
@@ -1212,6 +1217,7 @@ def meta_webhook(request):
 
         return HttpResponse(status=200)
 
+    logger.warning("Meta webhook method not allowed: method=%s route=%s status=405", request.method, request.path)
     return HttpResponse(status=405)
 
 

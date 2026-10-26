@@ -22,7 +22,9 @@ class CompanyMiddleware:
             "/api/token/refresh/",
             "/admin/",
             "/api/admin/integrations/meta/callback/",
+            "/api/admin/integrations/meta/callback",
             "/api/admin/webhooks/meta/",
+            "/api/admin/webhooks/meta",
             # Gmail OAuth callback: Google redirects the browser here without a JWT
             "/api/admin/email/callback/",
             # --- Twilio webhooks: hit directly by Twilio's servers, no JWT ---
@@ -31,7 +33,11 @@ class CompanyMiddleware:
         ]
 
 
-        if any(request.path.startswith(path) for path in public_paths):
+        normalized_path = request.path.rstrip("/")
+        if any(
+            request.path.startswith(path) or normalized_path == path.rstrip("/")
+            for path in public_paths
+        ):
             return self.get_response(request)
 
         auth_header = request.headers.get("Authorization", "")

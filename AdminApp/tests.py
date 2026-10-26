@@ -2758,3 +2758,40 @@ class MetaAdsIntegrationTests(TestCase):
         state_data = signing.loads(params["state"][0], salt="meta-oauth")
         self.assertEqual(state_data["company_id"], self.company_a.id)
         self.assertEqual(state_data["staff_id"], self.staff_a.id)
+
+    # 31. Webhook routes accept both trailing slash and no-slash without requiring JWT
+    @override_settings(META_WEBHOOK_VERIFY_TOKEN="my_test_verify_token", META_APP_SECRET="super_secret_key")
+    def test_webhook_routes_accept_slash_and_no_slash_without_auth(self):
+        # GET with slash
+        resp1 = self.client.get(
+            "/api/admin/webhooks/meta/?hub.mode=subscribe&hub.verify_token=my_test_verify_token&hub.challenge=test_1"
+        )
+        self.assertEqual(resp1.status_code, 200)
+        self.assertEqual(resp1.content.decode("utf-8"), "test_1")
+
+        # GET without slash
+        resp2 = self.client.get(
+            "/api/admin/webhooks/meta?hub.mode=subscribe&hub.verify_token=my_test_verify_token&hub.challenge=test_2"
+        )
+        self.assertEqual(resp2.status_code, 200)
+        self.assertEqual(resp2.content.decode("utf-8"), "test_2")
+
+        # POST with slash
+        body = json.dumps({"object": "page", "entry": []}).encode("utf-8")
+        sig = "sha256=" + hmac.new(b"super_secret_key", body, hashlib.sha256).hexdigest()
+        resp3 = self.client.post(
+            "/api/admin/webhooks/meta/",
+            data=body,
+            content_type="application/json",
+            HTTP_X_HUB_SIGNATURE_256=sig,
+        )
+        self.assertEqual(resp3.status_code, 200)
+
+        # POST without slash
+        resp4 = self.client.post(
+            "/api/admin/webhooks/meta",
+            data=body,
+            content_type="application/json",
+            HTTP_X_HUB_SIGNATURE_256=sig,
+        )
+        self.assertEqual(resp4.status_code, 200)
