@@ -11,7 +11,9 @@ import base64
 import hashlib
 import hmac as hmac_lib
 import json
+import threading
 import uuid
+from unittest.mock import MagicMock, patch
 
 from django.conf import settings
 from django.test import TestCase, override_settings
@@ -430,6 +432,223 @@ class MetaDataDeletionCallbackTest(TestCase):
         self.assertIn(
             "https://crm-backend-ejfr.onrender.com", data["url"]
         )
+
+    # ── 11. Non-dict JSON payloads ────────────────────────────────────────────
+
+    def test_signed_request_json_primitive_returns_400(self):
+        """
+        JSON payloads that decode to non-dict primitives (int, list, str, bool)
+        must return 400 invalid_payload_json rather than raising AttributeError.
+        """
+        for primitive_val in [12345, ["item1", "item2"], "just_a_string", True]:
+            signed_req = _make_signed_request(primitive_val)
+            resp = self.client.post(
+                CALLBACK_URL, data={"signed_request": signed_req}
+            )
+            self.assertEqual(resp.status_code, 400, f"Failed for {primitive_val}")
+            self.assertEqual(resp.json()["error"], "invalid_payload_json")
+
+    # ── 12. Transaction failure persistence (STATUS_ERROR) ───────────────────
+
+    def test_processing_failure_persists_status_error(self):
+        """
+        If _process_deletion_for_user raises an unhandled exception, the
+        MetaDeletionRequest must NOT be erased by the rollback. It must be
+        persisted with status='error' so it can be audited and queried.
+        """
+        with patch("AdminApp.views._process_deletion_for_user") as mock_proc:
+            mock_proc.side_effect = RuntimeError("Simulated database timeout")
+
+            signed_req = _make_signed_request({"user_id": "ERROR_USER_1"})
+            resp = self.client.post(
+                CALLBACK_URL, data={"signed_request": signed_req}
+            )
+            self.assertEqual(resp.status_code, 500)
+            self.assertEqual(resp.json()["error"], "server_error")
+
+            # Record must exist in database with STATUS_ERROR
+            record = MetaDeletionRequest.objects.filter(
+                facebook_user_id="ERROR_USER_1"
+            ).first()
+            self.assertIsNotNone(record)
+            self.assertEqual(record.status, MetaDeletionRequest.STATUS_ERROR)
+            self.assertIn("Processing failed", record.notes)
+            self.assertIsNotNone(record.completed_at)
+
+            # Public status endpoint must query the error record successfully
+            status_resp = self.client.get(
+                STATUS_URL, {"code": str(record.confirmation_code)}
+            )
+            self.assertEqual(status_resp.status_code, 200)
+            status_data = status_resp.json()
+            self.assertEqual(status_data["status"], "error")
+            self.assertEqual(status_data["confirmation_code"], str(record.confirmation_code))
+
+    # ── 13. Retry behavior after error ───────────────────────────────────────
+
+    def test_retry_after_error_succeeds(self):
+        """
+        If a previous deletion request ended in STATUS_ERROR, a subsequent
+        request for the same user should retry processing and update the record
+        to STATUS_COMPLETED or STATUS_NOT_FOUND.
+        """
+        # Create an existing error record
+        err_record = MetaDeletionRequest.objects.create(
+            facebook_user_id="RETRY_USER_1",
+            status=MetaDeletionRequest.STATUS_ERROR,
+            notes="Previous failure",
+        )
+        original_code = err_record.confirmation_code
+
+        # Now send a valid callback
+        signed_req = _make_signed_request({"user_id": "RETRY_USER_1"})
+        resp = self.client.post(
+            CALLBACK_URL, data={"signed_request": signed_req}
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+
+        # Reuses the original confirmation code
+        self.assertEqual(data["confirmation_code"], str(original_code))
+
+        # Record is now updated to not_found (since no integration exists)
+        err_record.refresh_from_db()
+        self.assertEqual(err_record.status, MetaDeletionRequest.STATUS_NOT_FOUND)
+
+    # ── 14. Concurrency handling ─────────────────────────────────────────────
+
+    def test_concurrent_callbacks_return_same_code(self):
+        """
+        Two concurrent callbacks for the same Facebook user should return the
+        same confirmation code without creating conflicting deletion records.
+        """
+        signed_req = _make_signed_request({"user_id": "CONCURRENT_USER_1"})
+        results = []
+
+        def worker():
+            from django.test import Client
+            c = Client()
+            r = c.post(CALLBACK_URL, data={"signed_request": signed_req})
+            results.append(r)
+
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        self.assertEqual(len(results), 2)
+        for r in results:
+            self.assertEqual(r.status_code, 200)
+
+        codes = [r.json()["confirmation_code"] for r in results]
+        self.assertEqual(codes[0], codes[1])
+
+        # Exactly 1 record in database
+        self.assertEqual(
+            MetaDeletionRequest.objects.filter(facebook_user_id="CONCURRENT_USER_1").count(),
+            1,
+        )
+
+    # ── 15. BACKEND_BASE_URL configuration validation ─────────────────────────
+
+    def test_missing_or_invalid_backend_base_url_in_production(self):
+        """
+        When DEBUG=False, BACKEND_BASE_URL must be configured and start with
+        https://. If missing or insecure, the callback must fail closed with 500.
+        """
+        signed_req = _make_signed_request({"user_id": "BASE_URL_TEST"})
+
+        # Missing base URL in production
+        with override_settings(DEBUG=False, BACKEND_BASE_URL=""):
+            resp = self.client.post(
+                CALLBACK_URL, data={"signed_request": signed_req}
+            )
+            self.assertEqual(resp.status_code, 500)
+            self.assertEqual(resp.json()["error"], "server_configuration_error")
+
+        # Insecure HTTP base URL in production
+        with override_settings(DEBUG=False, BACKEND_BASE_URL="http://insecure-domain.com"):
+            resp = self.client.post(
+                CALLBACK_URL, data={"signed_request": signed_req}
+            )
+            self.assertEqual(resp.status_code, 500)
+            self.assertEqual(resp.json()["error"], "server_configuration_error")
+
+    # ── 16. Webhook unsubscription on Meta Graph API ──────────────────────────
+
+    def test_remote_webhook_unsubscription_success(self):
+        """
+        Deleting an integration should call DELETE /{page_id}/subscribed_apps
+        for all associated MetaPage rows.
+        """
+        company, integration, _ = _make_company_and_integration(
+            fb_user_id="PAGE_UNSUB_USER"
+        )
+        page = MetaPage.objects.create(
+            company=company,
+            meta_integration=integration,
+            page_id="PAGE_999",
+            page_name="Unsub Test Page",
+            page_access_token="page_token_abc",
+        )
+
+        with patch("AdminApp.views.requests.delete") as mock_del:
+            mock_del.return_value = MagicMock(json=lambda: {"success": True})
+
+            signed_req = _make_signed_request({"user_id": "PAGE_UNSUB_USER"})
+            resp = self.client.post(
+                CALLBACK_URL, data={"signed_request": signed_req}
+            )
+            self.assertEqual(resp.status_code, 200)
+
+            # requests.delete should have been called for PAGE_999
+            mock_del.assert_called_once()
+            call_url = mock_del.call_args[0][0]
+            self.assertIn("PAGE_999/subscribed_apps", call_url)
+
+            # Record notes mention unsubscription
+            record = MetaDeletionRequest.objects.get(facebook_user_id="PAGE_UNSUB_USER")
+            self.assertIn("Page PAGE_999: unsubscribed", record.notes)
+
+    def test_remote_webhook_unsubscription_api_error_does_not_abort_deletion(self):
+        """
+        If Meta Graph API returns an error during unsubscription (e.g. token expired),
+        the local deletion of MetaIntegration and MetaPage must still succeed.
+        """
+        company, integration, _ = _make_company_and_integration(
+            fb_user_id="PAGE_ERR_USER"
+        )
+        page = MetaPage.objects.create(
+            company=company,
+            meta_integration=integration,
+            page_id="PAGE_888",
+            page_name="Error Page",
+            page_access_token="expired_token",
+        )
+
+        with patch("AdminApp.views.requests.delete") as mock_del:
+            mock_del.return_value = MagicMock(
+                json=lambda: {"error": {"code": 190, "message": "Invalid OAuth access token"}}
+            )
+
+            signed_req = _make_signed_request({"user_id": "PAGE_ERR_USER"})
+            resp = self.client.post(
+                CALLBACK_URL, data={"signed_request": signed_req}
+            )
+            self.assertEqual(resp.status_code, 200)
+
+            # Local MetaIntegration and MetaPage are still deleted
+            self.assertFalse(MetaIntegration.objects.filter(pk=integration.pk).exists())
+            self.assertFalse(MetaPage.objects.filter(pk=page.pk).exists())
+
+            # Notes record the API error code
+            record = MetaDeletionRequest.objects.get(facebook_user_id="PAGE_ERR_USER")
+            self.assertIn("api_error_190", record.notes)
+
+
+
 
 
 @override_settings(

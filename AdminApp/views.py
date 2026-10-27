@@ -36,7 +36,7 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db.models import Sum
 from django.db.models.functions import TruncWeek
 from django.db.models import Count
-from django.db import transaction, IntegrityError
+from django.db import transaction, IntegrityError, connection
 
 from AdminApp.email_utils import send_invite_email
 from AdminApp.models import Accounts, Address, Call, Case, CaseSolution, Company, Customer, Deal, Invoice, InvoiceItem, Lead, Meeting, PicklistOption, PriceBook, PriceBookItem, Product, PurchaseOrder, PurchaseOrderItem, QuoteProduct, Quotes, SalesOrder, SalesOrderItem, Service, Staff, StickyNote, Task, Vendor,MeetingParticipant,MeetingAttendeeLog
@@ -8777,7 +8777,7 @@ def view_due_sticky_note(request):
 # ── Meta Data Deletion Callback (Priority 1) ─────────────────────────────────
 #
 # Meta calls this URL when a Facebook user requests deletion of data the app
-# has collected on their behalf.  Spec:
+# has collected on their behalf. Spec:
 # https://developers.facebook.com/docs/development/create-an-app/app-dashboard/data-deletion-callback
 #
 # Endpoint: POST /api/admin/integrations/meta/data-deletion/
@@ -8785,23 +8785,107 @@ def view_due_sticky_note(request):
 # CSRF    : Exempt — no browser session is involved.
 
 import base64
+import threading
+
+_deletion_concurrency_lock = threading.Lock()
+
+
+def _build_deletion_status_url(request, confirmation_code):
+    """
+    Construct and validate the public status URL.
+    - Requires an absolute HTTPS URL in production (DEBUG=False).
+    - Avoids double slashes or missing slashes.
+    - Falls back to request.build_absolute_uri only in DEBUG/test mode.
+    - Returns None if configuration is invalid.
+    """
+    base_url = getattr(settings, "BACKEND_BASE_URL", None)
+    if base_url:
+        base_url = str(base_url).strip().rstrip("/")
+
+    if not base_url:
+        if settings.DEBUG:
+            base_url = request.build_absolute_uri("/").rstrip("/")
+        else:
+            logger.error(
+                "meta_data_deletion_callback: BACKEND_BASE_URL is not configured in production."
+            )
+            return None
+
+    # Enforce HTTPS scheme in production
+    if not settings.DEBUG and not base_url.startswith("https://"):
+        logger.error(
+            "meta_data_deletion_callback: BACKEND_BASE_URL must use https:// in production. Got: %s",
+            base_url,
+        )
+        return None
+
+    return f"{base_url}/api/admin/integrations/meta/deletion-status/?code={confirmation_code}"
+
+
+def unsubscribe_page_from_webhook(page_id, page_access_token, timeout=10):
+    """
+    Safely unsubscribe a single Facebook Page from the Meta app's webhooks.
+    Calls DELETE https://graph.facebook.com/v24.0/{page_id}/subscribed_apps
+    - Never logs access tokens. Only logs page_id and error codes.
+    - Handles network and API errors gracefully without raising exceptions.
+    - Returns (success_bool, message_str).
+    """
+    if not page_id or not page_access_token:
+        return False, "missing_credentials"
+
+    try:
+        resp = requests.delete(
+            f"https://graph.facebook.com/v24.0/{page_id}/subscribed_apps",
+            params={"access_token": page_access_token},
+            timeout=timeout,
+        )
+        data = resp.json()
+    except requests.RequestException:
+        logger.warning(
+            "unsubscribe_page_from_webhook: network error for page_id=%s", page_id
+        )
+        return False, "network_error"
+    except Exception:
+        logger.warning(
+            "unsubscribe_page_from_webhook: unexpected response parsing for page_id=%s", page_id
+        )
+        return False, "invalid_response"
+
+    if data.get("success") is True:
+        logger.info(
+            "unsubscribe_page_from_webhook: successfully unsubscribed page_id=%s", page_id
+        )
+        return True, "unsubscribed"
+
+    err = data.get("error", {})
+    err_code = err.get("code")
+    logger.warning(
+        "unsubscribe_page_from_webhook: Meta API error for page_id=%s: code=%s message=%s",
+        page_id,
+        err_code,
+        err.get("message"),
+    )
+    return False, f"api_error_{err_code}"
 
 
 def _parse_and_verify_signed_request(signed_request_str, app_secret):
     """
     Parse and verify Meta's signed_request parameter.
 
-    Format:  base64url(HMAC-SHA256(payload, app_secret)) . base64url(payload)
+    Format: base64url(HMAC-SHA256(payload, app_secret)) . base64url(payload)
 
     Returns (payload_dict, error_message).
-    On success error_message is None.
-    On failure payload_dict is None.
+    On success, payload_dict is a dictionary and error_message is None.
+    On failure, payload_dict is None.
 
     Security guarantees
     -------------------
-    * Uses hmac.compare_digest for constant-time comparison.
-    * Never logs the signature or raw payload.
-    * Returns distinct error codes so the caller can log safely.
+    * Rejects missing or empty app secrets.
+    * Rejects malformed requests missing a dot separator.
+    * Rejects invalid base64 encoding.
+    * Computes HMAC-SHA256 and compares using hmac.compare_digest for constant time.
+    * Validates that the parsed JSON payload is strictly a Python dict.
+    * Never logs raw signatures or raw payload strings.
     """
     if not app_secret:
         return None, "app_secret_not_configured"
@@ -8815,22 +8899,21 @@ def _parse_and_verify_signed_request(signed_request_str, app_secret):
 
     encoded_sig, encoded_payload = parts
 
-    # Decode the signature (base64url, no padding).
+    # Decode signature (base64url)
     try:
-        # Add back padding as needed.
         padded_sig = encoded_sig + "=" * (-len(encoded_sig) % 4)
         sig = base64.urlsafe_b64decode(padded_sig)
     except Exception:
         return None, "invalid_signature_encoding"
 
-    # Decode the payload (base64url, no padding).
+    # Decode payload (base64url)
     try:
         padded_payload = encoded_payload + "=" * (-len(encoded_payload) % 4)
         payload_bytes = base64.urlsafe_b64decode(padded_payload)
     except Exception:
         return None, "invalid_payload_encoding"
 
-    # Verify HMAC-SHA256.
+    # Verify HMAC-SHA256
     expected_sig = hmac.new(
         key=app_secret.encode("utf-8"),
         msg=encoded_payload.encode("utf-8"),
@@ -8840,10 +8923,14 @@ def _parse_and_verify_signed_request(signed_request_str, app_secret):
     if not hmac.compare_digest(expected_sig, sig):
         return None, "signature_mismatch"
 
-    # Parse JSON payload.
+    # Parse JSON payload
     try:
         payload = json.loads(payload_bytes.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
+        return None, "invalid_payload_json"
+
+    # Must be a JSON object / dictionary (prevents AttributeError on primitives)
+    if not isinstance(payload, dict):
         return None, "invalid_payload_json"
 
     return payload, None
@@ -8851,38 +8938,16 @@ def _parse_and_verify_signed_request(signed_request_str, app_secret):
 
 def _process_deletion_for_user(facebook_user_id):
     """
-    Identify and delete (or anonymize) CRM data that can be reliably linked
-    to the requesting Facebook User ID.
+    Identify and delete CRM credentials reliably linked to the requesting Facebook User ID.
 
-    Deletion scope rationale
-    ------------------------
-    Meta stores a per-app ``user_id`` for each Facebook user.  Our CRM stores
-    this in MetaIntegration.meta_user_id — it represents the CRM admin who
-    *connected* the integration using their Facebook account (i.e. the OAuth
-    user), NOT the individual leads that were submitted through Lead Ads forms.
+    Safe deletion scope:
+      1. Webhook unsubscription on Meta Graph API for each connected MetaPage.
+      2. MetaIntegration row(s) where meta_user_id == facebook_user_id.
+      3. MetaPage rows belonging to that MetaIntegration (CASCADE via FK).
 
-    Lead Ads form submissions do NOT carry the submitting user's Facebook
-    user_id in the webhook payload.  The ``leadgen_id`` uniquely identifies
-    a form submission but is NOT a Facebook User ID.  Therefore we cannot
-    reliably determine, from the ``facebook_user_id`` in the signed_request,
-    which individual Lead records in our DB belong to that specific Facebook
-    user.
-
-    Safe deletion scope (records we CAN reliably link to facebook_user_id):
-      1. MetaIntegration row(s) where meta_user_id == facebook_user_id.
-         → These rows confirm the CRM company that connected via this FB account.
-      2. MetaPage rows belonging to that MetaIntegration (CASCADE via FK).
-         → These are deleted implicitly when MetaIntegration is deleted.
-
-    Records we deliberately do NOT delete (cannot be reliably linked):
-      • Lead rows with lead_source="Facebook Ads" belonging to the company.
-        Reason: The Lead's data was submitted by an *end-user who filled in
-        the lead form*, NOT necessarily the Facebook account that owns the
-        integration.  Deleting those leads would destroy customer records of
-        an unrelated third party.
-
-    This limitation is documented in the ``notes`` field of each
-    MetaDeletionRequest record.
+    CRM Lead records (lead_source="Facebook Ads") are deliberately NOT deleted:
+      The Facebook user_id identifies the CRM admin who connected the integration,
+      not the end-users who submitted the Lead Ads forms.
 
     Returns (company_or_None, notes_string, status_constant)
     """
@@ -8901,11 +8966,21 @@ def _process_deletion_for_user(facebook_user_id):
         )
 
     deleted_companies = []
+    unsub_notes = []
+
     for integration in integrations:
         company = integration.company
         company_name = company.name if company else "(unknown)"
-        # Delete the MetaIntegration row.  MetaPage rows cascade automatically
-        # because MetaPage.meta_integration has on_delete=CASCADE.
+
+        # Attempt to unsubscribe connected pages from webhook on Meta's servers
+        pages = list(integration.pages.all())
+        for page in pages:
+            page_token = page.page_access_token or integration.page_access_token
+            if page.page_id and page_token:
+                success, msg = unsubscribe_page_from_webhook(page.page_id, page_token)
+                unsub_notes.append(f"Page {page.page_id}: {msg}")
+
+        # Delete the MetaIntegration row. MetaPage cascades via on_delete=CASCADE.
         integration.delete()
         deleted_companies.append(company_name)
         logger.info(
@@ -8914,17 +8989,17 @@ def _process_deletion_for_user(facebook_user_id):
             company_name,
         )
 
-    # Use the last matched company as the FK on the request record (for audit).
     matched_company = integrations[-1].company if integrations else None
 
+    unsub_summary = f" Webhook cleanup: {', '.join(unsub_notes)}." if unsub_notes else ""
     notes = (
         "Deleted MetaIntegration (and associated MetaPage records via CASCADE) "
-        "for company/companies: %s. "
+        "for company/companies: %s.%s "
         "Lead Ads form-submission Lead records were NOT deleted: the Facebook "
         "user_id in this request identifies the CRM admin who connected the "
         "integration via OAuth, not the individual lead submitters; a reliable "
         "per-record link cannot be established from the available data."
-        % ", ".join(deleted_companies)
+        % (", ".join(deleted_companies), unsub_summary)
     )
 
     return matched_company, notes, "completed"
@@ -8940,19 +9015,8 @@ def meta_data_deletion_callback(request):
 
     Public endpoint for Meta's server-to-server User Data Deletion callback.
     No CRM JWT authentication is required or checked.
-
-    Meta sends a signed_request POST parameter.  We:
-      1. Verify the HMAC-SHA256 signature using META_APP_SECRET.
-      2. Extract the facebook_user_id from the verified payload.
-      3. Check for an existing MetaDeletionRequest for this user (idempotency).
-      4. Delete/anonymize identifiable data in a transaction.
-      5. Record the outcome in MetaDeletionRequest.
-      6. Return the response format required by Meta's specification.
     """
     app_secret = getattr(settings, "META_APP_SECRET", None)
-
-    # Hard block — never accept a deletion request if the app secret is unset.
-    # This prevents a misconfigured deploy from silently accepting any POST.
     if not app_secret:
         logger.error(
             "meta_data_deletion_callback: META_APP_SECRET is not configured. "
@@ -8963,7 +9027,6 @@ def meta_data_deletion_callback(request):
             status=503,
         )
 
-    # Meta sends the signed_request as a form POST field.
     signed_request_str = request.POST.get("signed_request") or request.data.get(
         "signed_request"
     )
@@ -8973,7 +9036,6 @@ def meta_data_deletion_callback(request):
     )
 
     if parse_error:
-        # Log error code only — never log the signed_request value itself.
         logger.warning(
             "meta_data_deletion_callback: rejected request. reason=%s", parse_error
         )
@@ -8989,50 +9051,76 @@ def meta_data_deletion_callback(request):
 
     facebook_user_id = str(facebook_user_id).strip()
 
-    # ── Idempotency ──────────────────────────────────────────────────────────
-    # If a completed, pending, or not-found request already exists for this
-    # user, return the existing confirmation code rather than creating a
-    # duplicate.  A 'not_found' result is still a fully-processed request.
-    existing = MetaDeletionRequest.objects.filter(
-        facebook_user_id=facebook_user_id,
-        status__in=[
-            MetaDeletionRequest.STATUS_COMPLETED,
-            MetaDeletionRequest.STATUS_PENDING,
-            MetaDeletionRequest.STATUS_NOT_FOUND,
-        ],
-    ).order_by("-requested_at").first()
-
-    if existing:
-        logger.info(
-            "meta_data_deletion_callback: duplicate request for fb_user=[redacted]. "
-            "Returning existing confirmation_code=%s",
-            existing.confirmation_code,
-        )
-        status_url = (
-            f"{settings.BACKEND_BASE_URL}"
-            f"/api/admin/integrations/meta/deletion-status/"
-            f"?code={existing.confirmation_code}"
+    # Pre-validate base URL configuration before performing any DB actions
+    probe_url = _build_deletion_status_url(request, "00000000-0000-0000-0000-000000000000")
+    if not probe_url:
+        logger.error(
+            "meta_data_deletion_callback: BACKEND_BASE_URL is invalid or missing in production."
         )
         return JsonResponse(
-            {
-                "url": status_url,
-                "confirmation_code": str(existing.confirmation_code),
-            },
-            status=200,
+            {"error": "server_configuration_error", "message": "Invalid backend base URL configuration."},
+            status=500,
         )
 
-    # ── Process deletion inside a transaction ────────────────────────────────
-    deletion_record = None
-    try:
-        with transaction.atomic():
+    # ── Concurrency & Idempotency Lock ───────────────────────────────────────
+    with _deletion_concurrency_lock:
+        if connection.vendor == "postgresql":
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", [facebook_user_id])
+
+        # 1. Check for existing completed, pending, or not_found requests
+        existing = MetaDeletionRequest.objects.filter(
+            facebook_user_id=facebook_user_id,
+            status__in=[
+                MetaDeletionRequest.STATUS_COMPLETED,
+                MetaDeletionRequest.STATUS_PENDING,
+                MetaDeletionRequest.STATUS_NOT_FOUND,
+            ],
+        ).order_by("-requested_at").first()
+
+        if existing:
+            logger.info(
+                "meta_data_deletion_callback: duplicate request for fb_user=[redacted]. "
+                "Returning existing confirmation_code=%s",
+                existing.confirmation_code,
+            )
+            status_url = _build_deletion_status_url(request, existing.confirmation_code)
+            return JsonResponse(
+                {
+                    "url": status_url,
+                    "confirmation_code": str(existing.confirmation_code),
+                },
+                status=200,
+            )
+
+        # 2. Check if a previous failed request exists for retry recovery
+        deletion_record = MetaDeletionRequest.objects.filter(
+            facebook_user_id=facebook_user_id,
+            status=MetaDeletionRequest.STATUS_ERROR,
+        ).order_by("-requested_at").first()
+
+        if deletion_record:
+            # Reuse existing record to maintain consistent confirmation code on retry
+            deletion_record.status = MetaDeletionRequest.STATUS_PENDING
+            deletion_record.notes = "Retrying deletion request."
+            deletion_record.completed_at = None
+            deletion_record.save(update_fields=["status", "notes", "completed_at"])
+        else:
+            # Create and immediately commit initial record so it survives any processing failure
             deletion_record = MetaDeletionRequest.objects.create(
                 facebook_user_id=facebook_user_id,
                 status=MetaDeletionRequest.STATUS_PENDING,
             )
 
-            matched_company, notes, outcome = _process_deletion_for_user(
-                facebook_user_id
-            )
+        confirmation_code = str(deletion_record.confirmation_code)
+        status_url = _build_deletion_status_url(request, confirmation_code)
+
+        # ── Execute Deletion within an Isolated Transaction ───────────────────
+        try:
+            with transaction.atomic():
+                matched_company, notes, outcome = _process_deletion_for_user(
+                    facebook_user_id
+                )
 
             final_status = (
                 MetaDeletionRequest.STATUS_COMPLETED
@@ -9048,45 +9136,40 @@ def meta_data_deletion_callback(request):
                 update_fields=["company", "status", "notes", "completed_at"]
             )
 
-    except Exception:
-        logger.exception(
-            "meta_data_deletion_callback: unhandled error during processing "
-            "for fb_user=[redacted]."
-        )
-        # If we managed to create the record before the error, mark it failed.
-        if deletion_record and deletion_record.pk:
+        except Exception:
+            logger.exception(
+                "meta_data_deletion_callback: unhandled error during processing "
+                "for fb_user=[redacted]."
+            )
+            # Record failure in database outside the rolled-back deletion transaction
             try:
                 deletion_record.status = MetaDeletionRequest.STATUS_ERROR
-                deletion_record.notes = "Unhandled server error during processing."
+                deletion_record.notes = "Processing failed: an unexpected error occurred."
                 deletion_record.completed_at = timezone.now()
                 deletion_record.save(
                     update_fields=["status", "notes", "completed_at"]
                 )
             except Exception:
-                pass
-        return JsonResponse({"error": "server_error"}, status=500)
+                logger.exception(
+                    "meta_data_deletion_callback: failed to record error status for fb_user=[redacted]."
+                )
 
-    confirmation_code = str(deletion_record.confirmation_code)
-    status_url = (
-        f"{settings.BACKEND_BASE_URL}"
-        f"/api/admin/integrations/meta/deletion-status/"
-        f"?code={confirmation_code}"
-    )
+            return JsonResponse({"error": "server_error"}, status=500)
 
-    logger.info(
-        "meta_data_deletion_callback: processed request. "
-        "confirmation_code=%s status=%s",
-        confirmation_code,
-        deletion_record.status,
-    )
+        logger.info(
+            "meta_data_deletion_callback: processed request. "
+            "confirmation_code=%s status=%s",
+            confirmation_code,
+            deletion_record.status,
+        )
 
-    return JsonResponse(
-        {
-            "url": status_url,
-            "confirmation_code": confirmation_code,
-        },
-        status=200,
-    )
+        return JsonResponse(
+            {
+                "url": status_url,
+                "confirmation_code": confirmation_code,
+            },
+            status=200,
+        )
 
 
 @api_view(["GET"])
@@ -9101,7 +9184,7 @@ def meta_deletion_status(request):
 
     Returns only the minimum information needed:
       - confirmation_code
-      - status  (pending | completed | not_found | error)
+      - status (pending | completed | not_found | error)
       - requested_at
       - completed_at (null if not yet finished)
 
@@ -9111,7 +9194,6 @@ def meta_deletion_status(request):
     if not code_param:
         return JsonResponse({"error": "Missing required parameter: code"}, status=400)
 
-    # Validate UUID format before querying.
     try:
         code_uuid = uuid.UUID(code_param)
     except ValueError:
@@ -9134,4 +9216,5 @@ def meta_deletion_status(request):
         },
         status=200,
     )
+
 
