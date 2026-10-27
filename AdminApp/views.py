@@ -64,6 +64,7 @@ from AdminApp.services import create_lead_for_company, get_related_label, notify
 
 from .models import (
     EmailIntegration,
+    MetaDeletionRequest,
     MetaIntegration,
     MetaPage,
     Meeting,
@@ -8771,3 +8772,366 @@ def view_due_sticky_note(request):
         },
         status=status.HTTP_200_OK,
     )
+
+
+# ── Meta Data Deletion Callback (Priority 1) ─────────────────────────────────
+#
+# Meta calls this URL when a Facebook user requests deletion of data the app
+# has collected on their behalf.  Spec:
+# https://developers.facebook.com/docs/development/create-an-app/app-dashboard/data-deletion-callback
+#
+# Endpoint: POST /api/admin/integrations/meta/data-deletion/
+# Auth    : None (server-to-server; verified by signed_request HMAC-SHA256)
+# CSRF    : Exempt — no browser session is involved.
+
+import base64
+
+
+def _parse_and_verify_signed_request(signed_request_str, app_secret):
+    """
+    Parse and verify Meta's signed_request parameter.
+
+    Format:  base64url(HMAC-SHA256(payload, app_secret)) . base64url(payload)
+
+    Returns (payload_dict, error_message).
+    On success error_message is None.
+    On failure payload_dict is None.
+
+    Security guarantees
+    -------------------
+    * Uses hmac.compare_digest for constant-time comparison.
+    * Never logs the signature or raw payload.
+    * Returns distinct error codes so the caller can log safely.
+    """
+    if not app_secret:
+        return None, "app_secret_not_configured"
+
+    if not signed_request_str or not isinstance(signed_request_str, str):
+        return None, "missing_signed_request"
+
+    parts = signed_request_str.split(".", 1)
+    if len(parts) != 2:
+        return None, "malformed_signed_request"
+
+    encoded_sig, encoded_payload = parts
+
+    # Decode the signature (base64url, no padding).
+    try:
+        # Add back padding as needed.
+        padded_sig = encoded_sig + "=" * (-len(encoded_sig) % 4)
+        sig = base64.urlsafe_b64decode(padded_sig)
+    except Exception:
+        return None, "invalid_signature_encoding"
+
+    # Decode the payload (base64url, no padding).
+    try:
+        padded_payload = encoded_payload + "=" * (-len(encoded_payload) % 4)
+        payload_bytes = base64.urlsafe_b64decode(padded_payload)
+    except Exception:
+        return None, "invalid_payload_encoding"
+
+    # Verify HMAC-SHA256.
+    expected_sig = hmac.new(
+        key=app_secret.encode("utf-8"),
+        msg=encoded_payload.encode("utf-8"),
+        digestmod=hashlib.sha256,
+    ).digest()
+
+    if not hmac.compare_digest(expected_sig, sig):
+        return None, "signature_mismatch"
+
+    # Parse JSON payload.
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None, "invalid_payload_json"
+
+    return payload, None
+
+
+def _process_deletion_for_user(facebook_user_id):
+    """
+    Identify and delete (or anonymize) CRM data that can be reliably linked
+    to the requesting Facebook User ID.
+
+    Deletion scope rationale
+    ------------------------
+    Meta stores a per-app ``user_id`` for each Facebook user.  Our CRM stores
+    this in MetaIntegration.meta_user_id — it represents the CRM admin who
+    *connected* the integration using their Facebook account (i.e. the OAuth
+    user), NOT the individual leads that were submitted through Lead Ads forms.
+
+    Lead Ads form submissions do NOT carry the submitting user's Facebook
+    user_id in the webhook payload.  The ``leadgen_id`` uniquely identifies
+    a form submission but is NOT a Facebook User ID.  Therefore we cannot
+    reliably determine, from the ``facebook_user_id`` in the signed_request,
+    which individual Lead records in our DB belong to that specific Facebook
+    user.
+
+    Safe deletion scope (records we CAN reliably link to facebook_user_id):
+      1. MetaIntegration row(s) where meta_user_id == facebook_user_id.
+         → These rows confirm the CRM company that connected via this FB account.
+      2. MetaPage rows belonging to that MetaIntegration (CASCADE via FK).
+         → These are deleted implicitly when MetaIntegration is deleted.
+
+    Records we deliberately do NOT delete (cannot be reliably linked):
+      • Lead rows with lead_source="Facebook Ads" belonging to the company.
+        Reason: The Lead's data was submitted by an *end-user who filled in
+        the lead form*, NOT necessarily the Facebook account that owns the
+        integration.  Deleting those leads would destroy customer records of
+        an unrelated third party.
+
+    This limitation is documented in the ``notes`` field of each
+    MetaDeletionRequest record.
+
+    Returns (company_or_None, notes_string, status_constant)
+    """
+    integrations = list(
+        MetaIntegration.objects.filter(
+            meta_user_id=facebook_user_id,
+        ).select_related("company")
+    )
+
+    if not integrations:
+        return (
+            None,
+            "No MetaIntegration matched this Facebook User ID. "
+            "No CRM data was deleted.",
+            "not_found",
+        )
+
+    deleted_companies = []
+    for integration in integrations:
+        company = integration.company
+        company_name = company.name if company else "(unknown)"
+        # Delete the MetaIntegration row.  MetaPage rows cascade automatically
+        # because MetaPage.meta_integration has on_delete=CASCADE.
+        integration.delete()
+        deleted_companies.append(company_name)
+        logger.info(
+            "MetaDeletionRequest: deleted MetaIntegration for company=%s "
+            "triggered by facebook_user_id=[redacted]",
+            company_name,
+        )
+
+    # Use the last matched company as the FK on the request record (for audit).
+    matched_company = integrations[-1].company if integrations else None
+
+    notes = (
+        "Deleted MetaIntegration (and associated MetaPage records via CASCADE) "
+        "for company/companies: %s. "
+        "Lead Ads form-submission Lead records were NOT deleted: the Facebook "
+        "user_id in this request identifies the CRM admin who connected the "
+        "integration via OAuth, not the individual lead submitters; a reliable "
+        "per-record link cannot be established from the available data."
+        % ", ".join(deleted_companies)
+    )
+
+    return matched_company, notes, "completed"
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+@authentication_classes([])
+@csrf_exempt
+def meta_data_deletion_callback(request):
+    """
+    POST /api/admin/integrations/meta/data-deletion/
+
+    Public endpoint for Meta's server-to-server User Data Deletion callback.
+    No CRM JWT authentication is required or checked.
+
+    Meta sends a signed_request POST parameter.  We:
+      1. Verify the HMAC-SHA256 signature using META_APP_SECRET.
+      2. Extract the facebook_user_id from the verified payload.
+      3. Check for an existing MetaDeletionRequest for this user (idempotency).
+      4. Delete/anonymize identifiable data in a transaction.
+      5. Record the outcome in MetaDeletionRequest.
+      6. Return the response format required by Meta's specification.
+    """
+    app_secret = getattr(settings, "META_APP_SECRET", None)
+
+    # Hard block — never accept a deletion request if the app secret is unset.
+    # This prevents a misconfigured deploy from silently accepting any POST.
+    if not app_secret:
+        logger.error(
+            "meta_data_deletion_callback: META_APP_SECRET is not configured. "
+            "Rejecting request to prevent unauthenticated deletions."
+        )
+        return JsonResponse(
+            {"error": "Callback not available — server configuration error."},
+            status=503,
+        )
+
+    # Meta sends the signed_request as a form POST field.
+    signed_request_str = request.POST.get("signed_request") or request.data.get(
+        "signed_request"
+    )
+
+    payload, parse_error = _parse_and_verify_signed_request(
+        signed_request_str, app_secret
+    )
+
+    if parse_error:
+        # Log error code only — never log the signed_request value itself.
+        logger.warning(
+            "meta_data_deletion_callback: rejected request. reason=%s", parse_error
+        )
+        http_status = 400 if parse_error != "signature_mismatch" else 403
+        return JsonResponse({"error": parse_error}, status=http_status)
+
+    facebook_user_id = payload.get("user_id")
+    if not facebook_user_id or not str(facebook_user_id).strip():
+        logger.warning(
+            "meta_data_deletion_callback: signed_request payload missing user_id."
+        )
+        return JsonResponse({"error": "missing_user_id_in_payload"}, status=400)
+
+    facebook_user_id = str(facebook_user_id).strip()
+
+    # ── Idempotency ──────────────────────────────────────────────────────────
+    # If a completed, pending, or not-found request already exists for this
+    # user, return the existing confirmation code rather than creating a
+    # duplicate.  A 'not_found' result is still a fully-processed request.
+    existing = MetaDeletionRequest.objects.filter(
+        facebook_user_id=facebook_user_id,
+        status__in=[
+            MetaDeletionRequest.STATUS_COMPLETED,
+            MetaDeletionRequest.STATUS_PENDING,
+            MetaDeletionRequest.STATUS_NOT_FOUND,
+        ],
+    ).order_by("-requested_at").first()
+
+    if existing:
+        logger.info(
+            "meta_data_deletion_callback: duplicate request for fb_user=[redacted]. "
+            "Returning existing confirmation_code=%s",
+            existing.confirmation_code,
+        )
+        status_url = (
+            f"{settings.BACKEND_BASE_URL}"
+            f"/api/admin/integrations/meta/deletion-status/"
+            f"?code={existing.confirmation_code}"
+        )
+        return JsonResponse(
+            {
+                "url": status_url,
+                "confirmation_code": str(existing.confirmation_code),
+            },
+            status=200,
+        )
+
+    # ── Process deletion inside a transaction ────────────────────────────────
+    deletion_record = None
+    try:
+        with transaction.atomic():
+            deletion_record = MetaDeletionRequest.objects.create(
+                facebook_user_id=facebook_user_id,
+                status=MetaDeletionRequest.STATUS_PENDING,
+            )
+
+            matched_company, notes, outcome = _process_deletion_for_user(
+                facebook_user_id
+            )
+
+            final_status = (
+                MetaDeletionRequest.STATUS_COMPLETED
+                if outcome == "completed"
+                else MetaDeletionRequest.STATUS_NOT_FOUND
+            )
+
+            deletion_record.company = matched_company
+            deletion_record.status = final_status
+            deletion_record.notes = notes
+            deletion_record.completed_at = timezone.now()
+            deletion_record.save(
+                update_fields=["company", "status", "notes", "completed_at"]
+            )
+
+    except Exception:
+        logger.exception(
+            "meta_data_deletion_callback: unhandled error during processing "
+            "for fb_user=[redacted]."
+        )
+        # If we managed to create the record before the error, mark it failed.
+        if deletion_record and deletion_record.pk:
+            try:
+                deletion_record.status = MetaDeletionRequest.STATUS_ERROR
+                deletion_record.notes = "Unhandled server error during processing."
+                deletion_record.completed_at = timezone.now()
+                deletion_record.save(
+                    update_fields=["status", "notes", "completed_at"]
+                )
+            except Exception:
+                pass
+        return JsonResponse({"error": "server_error"}, status=500)
+
+    confirmation_code = str(deletion_record.confirmation_code)
+    status_url = (
+        f"{settings.BACKEND_BASE_URL}"
+        f"/api/admin/integrations/meta/deletion-status/"
+        f"?code={confirmation_code}"
+    )
+
+    logger.info(
+        "meta_data_deletion_callback: processed request. "
+        "confirmation_code=%s status=%s",
+        confirmation_code,
+        deletion_record.status,
+    )
+
+    return JsonResponse(
+        {
+            "url": status_url,
+            "confirmation_code": confirmation_code,
+        },
+        status=200,
+    )
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+@authentication_classes([])
+def meta_deletion_status(request):
+    """
+    GET /api/admin/integrations/meta/deletion-status/?code=<uuid>
+
+    Public endpoint for checking the status of a Meta data deletion request.
+    Required by Meta's Data Deletion Callback specification.
+
+    Returns only the minimum information needed:
+      - confirmation_code
+      - status  (pending | completed | not_found | error)
+      - requested_at
+      - completed_at (null if not yet finished)
+
+    Deliberately omits: facebook_user_id, company info, tokens, notes.
+    """
+    code_param = request.GET.get("code", "").strip()
+    if not code_param:
+        return JsonResponse({"error": "Missing required parameter: code"}, status=400)
+
+    # Validate UUID format before querying.
+    try:
+        code_uuid = uuid.UUID(code_param)
+    except ValueError:
+        return JsonResponse({"error": "Invalid confirmation code format."}, status=400)
+
+    try:
+        record = MetaDeletionRequest.objects.get(confirmation_code=code_uuid)
+    except MetaDeletionRequest.DoesNotExist:
+        return JsonResponse(
+            {"error": "No deletion request found for the provided confirmation code."},
+            status=404,
+        )
+
+    return JsonResponse(
+        {
+            "confirmation_code": str(record.confirmation_code),
+            "status": record.status,
+            "requested_at": record.requested_at.isoformat() if record.requested_at else None,
+            "completed_at": record.completed_at.isoformat() if record.completed_at else None,
+        },
+        status=200,
+    )
+

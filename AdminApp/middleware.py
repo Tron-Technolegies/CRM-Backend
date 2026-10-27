@@ -25,6 +25,9 @@ class CompanyMiddleware:
             "/api/admin/integrations/meta/callback",
             "/api/admin/webhooks/meta/",
             "/api/admin/webhooks/meta",
+            # Meta Data Deletion Callback & Status — server-to-server / public
+            "/api/admin/integrations/meta/data-deletion/",
+            "/api/admin/integrations/meta/deletion-status/",
             # Gmail OAuth callback: Google redirects the browser here without a JWT
             "/api/admin/email/callback/",
             # --- Twilio webhooks: hit directly by Twilio's servers, no JWT ---

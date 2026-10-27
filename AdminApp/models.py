@@ -1473,3 +1473,89 @@ class StickyNote(models.Model):
     def __str__(self):
         staff_name = self.staff.full_name if self.staff else "Unknown"
         return f"StickyNote - {staff_name} ({self.company.name if self.company else 'No Company'})"
+
+
+class MetaDeletionRequest(models.Model):
+    """
+    Tracks a Facebook user data-deletion request delivered via Meta's
+    signed_request callback.
+
+    Design constraints
+    ------------------
+    * confirmation_code — UUID v4, used as the public token in the status URL.
+      It is safe to expose; it carries no personal data on its own.
+    * facebook_user_id  — The plain-text Facebook User ID from the verified
+      signed_request.  This is a platform-level identifier (not a personal
+      name, email, or financial datum) and is necessary to identify which
+      MetaIntegration the request belongs to and to record the outcome.
+      It is stored only for the duration needed to process and audit the
+      request.
+    * No access tokens, app secrets, or raw signed_request payloads are stored.
+    * company — Nullable FK; the company whose integration matched this user ID
+      at the time of processing.  Null if no matching integration was found
+      (still recorded for audit purposes).
+    """
+
+    STATUS_PENDING = "pending"
+    STATUS_COMPLETED = "completed"
+    STATUS_NOT_FOUND = "not_found"
+    STATUS_ERROR = "error"
+
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_COMPLETED, "Completed"),
+        (STATUS_NOT_FOUND, "Not Found — no matching integration"),
+        (STATUS_ERROR, "Error — processing failed"),
+    ]
+
+    # Public-facing token used in the status URL.
+    confirmation_code = models.UUIDField(
+        default=uuid.uuid4,
+        unique=True,
+        db_index=True,
+        editable=False,
+    )
+
+    # The Facebook User ID from the verified signed_request.
+    facebook_user_id = models.CharField(
+        max_length=255,
+        db_index=True,
+    )
+
+    # Which CRM company's integration matched this FB user ID, if any.
+    company = models.ForeignKey(
+        Company,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="meta_deletion_requests",
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_PENDING,
+    )
+
+    # Short human-readable note about what was deleted / not deleted.
+    # Never stores personal data or tokens.
+    notes = models.TextField(blank=True, default="")
+
+    requested_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-requested_at"]
+        indexes = [
+            models.Index(
+                fields=["facebook_user_id", "status"],
+                name="metadel_uid_status_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"MetaDeletionRequest {self.confirmation_code} "
+            f"[{self.status}] fb_user={self.facebook_user_id}"
+        )
+

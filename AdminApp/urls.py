@@ -166,6 +166,19 @@ urlpatterns= [
     path('webhooks/meta', views.meta_webhook, name='meta-webhook-noslash'),
     path('integrations/meta/status/', views.meta_status, name='meta-status'),
 
+    # ── Meta Data Deletion Callback & Status (Priority 1) ─────────────────────
+    # Public — no JWT required. Verified via Meta's signed_request HMAC-SHA256.
+    path(
+        'integrations/meta/data-deletion/',
+        views.meta_data_deletion_callback,
+        name='meta-data-deletion-callback',
+    ),
+    path(
+        'integrations/meta/deletion-status/',
+        views.meta_deletion_status,
+        name='meta-deletion-status',
+    ),
+
     path('calls/dial-out/', views.dial_out, name='call-dial-out'),
     path('calls/connect-twiml/', views.connect_twiml, name='call-connect-twiml'),
     path('calls/status-callback/', views.call_status_callback, name='call-status-callback'),
