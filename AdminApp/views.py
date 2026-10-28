@@ -8859,12 +8859,23 @@ def unsubscribe_page_from_webhook(page_id, page_access_token, timeout=10):
 
     err = data.get("error", {})
     err_code = err.get("code")
-    logger.warning(
-        "unsubscribe_page_from_webhook: Meta API error for page_id=%s: code=%s message=%s",
-        page_id,
-        err_code,
-        err.get("message"),
-    )
+    err_msg = err.get("message", "")
+
+    # Code 190 occurs when the user has deauthorized the app or the token was revoked.
+    # This is an expected condition during data deletion callback processing.
+    if err_code == 190:
+        logger.info(
+            "unsubscribe_page_from_webhook: Page %s token already revoked/deauthorized on Meta (code 190: %s). Local cleanup proceeding.",
+            page_id,
+            err_msg,
+        )
+    else:
+        logger.warning(
+            "unsubscribe_page_from_webhook: Meta API error for page_id=%s: code=%s message=%s",
+            page_id,
+            err_code,
+            err_msg,
+        )
     return False, f"api_error_{err_code}"
 
 
@@ -8974,11 +8985,17 @@ def _process_deletion_for_user(facebook_user_id):
 
         # Attempt to unsubscribe connected pages from webhook on Meta's servers
         pages = list(integration.pages.all())
-        for page in pages:
-            page_token = page.page_access_token or integration.page_access_token
-            if page.page_id and page_token:
-                success, msg = unsubscribe_page_from_webhook(page.page_id, page_token)
-                unsub_notes.append(f"Page {page.page_id}: {msg}")
+        if pages:
+            for page in pages:
+                page_token = page.page_access_token or integration.page_access_token
+                if page.page_id and page_token:
+                    success, msg = unsubscribe_page_from_webhook(page.page_id, page_token)
+                    unsub_notes.append(f"Page {page.page_id}: {msg}")
+        elif integration.page_id and (integration.page_access_token or integration.access_token):
+            # Fallback for legacy single-page integrations without MetaPage rows
+            token = integration.page_access_token or integration.access_token
+            success, msg = unsubscribe_page_from_webhook(integration.page_id, token)
+            unsub_notes.append(f"Page {integration.page_id}: {msg}")
 
         # Delete the MetaIntegration row. MetaPage cascades via on_delete=CASCADE.
         integration.delete()

@@ -647,6 +647,160 @@ class MetaDataDeletionCallbackTest(TestCase):
             record = MetaDeletionRequest.objects.get(facebook_user_id="PAGE_ERR_USER")
             self.assertIn("api_error_190", record.notes)
 
+    def test_page_token_revoked_code_190_exact_meta_error_message(self):
+        """
+        Simulate Meta's exact error message when a user has removed/deauthorized
+        the application before or during data deletion callback:
+        code=190 'Error validating access token: The user has not authorized application ...'
+        Verify that local integration and pages are deleted cleanly and final status is 'completed'.
+        """
+        company, integration, _ = _make_company_and_integration(
+            fb_user_id="FB_USER_REVOKED_APP"
+        )
+        page = MetaPage.objects.create(
+            company=company,
+            meta_integration=integration,
+            page_id="415404014994690",
+            page_name="Revoked Page",
+            page_access_token="revoked_token_xyz",
+        )
+
+        with patch("AdminApp.views.requests.delete") as mock_del:
+            mock_del.return_value = MagicMock(
+                json=lambda: {
+                    "error": {
+                        "message": "Error validating access token: The user has not authorized application 1865139438174659.",
+                        "type": "OAuthException",
+                        "code": 190,
+                        "error_subcode": 458,
+                    }
+                }
+            )
+
+            signed_req = _make_signed_request({"user_id": "FB_USER_REVOKED_APP"})
+            resp = self.client.post(
+                CALLBACK_URL, data={"signed_request": signed_req}
+            )
+            self.assertEqual(resp.status_code, 200)
+            data = resp.json()
+            code = data["confirmation_code"]
+
+            # Local MetaIntegration and MetaPage are deleted
+            self.assertFalse(MetaIntegration.objects.filter(pk=integration.pk).exists())
+            self.assertFalse(MetaPage.objects.filter(pk=page.pk).exists())
+
+            # Deletion request status is completed
+            record = MetaDeletionRequest.objects.get(confirmation_code=code)
+            self.assertEqual(record.status, MetaDeletionRequest.STATUS_COMPLETED)
+            self.assertIn("api_error_190", record.notes)
+
+            # Querying the status endpoint confirms completed status
+            status_resp = self.client.get(STATUS_URL, {"code": code})
+            self.assertEqual(status_resp.status_code, 200)
+            self.assertEqual(status_resp.json()["status"], "completed")
+
+    def test_remote_webhook_unsubscription_network_error_does_not_abort_deletion(self):
+        """
+        If a network timeout occurs while contacting Meta's Graph API, the local
+        cleanup must proceed to delete the MetaIntegration and MetaPage.
+        """
+        import requests
+        company, integration, _ = _make_company_and_integration(
+            fb_user_id="FB_USER_NET_ERR"
+        )
+        page = MetaPage.objects.create(
+            company=company,
+            meta_integration=integration,
+            page_id="PAGE_NET_123",
+            page_name="Network Page",
+            page_access_token="token_net",
+        )
+
+        with patch("AdminApp.views.requests.delete") as mock_del:
+            mock_del.side_effect = requests.RequestException("Graph API timeout")
+
+            signed_req = _make_signed_request({"user_id": "FB_USER_NET_ERR"})
+            resp = self.client.post(
+                CALLBACK_URL, data={"signed_request": signed_req}
+            )
+            self.assertEqual(resp.status_code, 200)
+
+            # Local integration and page deleted
+            self.assertFalse(MetaIntegration.objects.filter(pk=integration.pk).exists())
+            self.assertFalse(MetaPage.objects.filter(pk=page.pk).exists())
+
+            record = MetaDeletionRequest.objects.get(facebook_user_id="FB_USER_NET_ERR")
+            self.assertEqual(record.status, MetaDeletionRequest.STATUS_COMPLETED)
+            self.assertIn("network_error", record.notes)
+
+    def test_legacy_single_page_integration_unsubscribes_and_deletes(self):
+        """
+        Legacy single-page integrations (with page_id on MetaIntegration and no
+        MetaPage rows) must still attempt unsubscribe and delete cleanly.
+        """
+        company, integration, _ = _make_company_and_integration(
+            fb_user_id="LEGACY_FB_USER"
+        )
+        integration.page_id = "LEGACY_PAGE_99"
+        integration.page_access_token = "legacy_page_token_99"
+        integration.save()
+
+        with patch("AdminApp.views.requests.delete") as mock_del:
+            mock_del.return_value = MagicMock(json=lambda: {"success": True})
+
+            signed_req = _make_signed_request({"user_id": "LEGACY_FB_USER"})
+            resp = self.client.post(
+                CALLBACK_URL, data={"signed_request": signed_req}
+            )
+            self.assertEqual(resp.status_code, 200)
+
+            # Unsubscribe was called for legacy page
+            mock_del.assert_called_once()
+            self.assertIn("LEGACY_PAGE_99/subscribed_apps", mock_del.call_args[0][0])
+
+            # Integration deleted
+            self.assertFalse(MetaIntegration.objects.filter(pk=integration.pk).exists())
+
+    def test_unknown_facebook_user_id_reports_not_found_on_status_endpoint(self):
+        """
+        When a verified signed request has an unknown Facebook User ID (no matching
+        CRM integration), the callback returns 200 with confirmation code and
+        the status endpoint reports status='not_found'.
+        """
+        signed_req = _make_signed_request({"user_id": "UNKNOWN_FB_USER_777"})
+        resp = self.client.post(
+            CALLBACK_URL, data={"signed_request": signed_req}
+        )
+        self.assertEqual(resp.status_code, 200)
+        code = resp.json()["confirmation_code"]
+
+        # Status endpoint confirms 'not_found'
+        status_resp = self.client.get(STATUS_URL, {"code": code})
+        self.assertEqual(status_resp.status_code, 200)
+        status_data = status_resp.json()
+        self.assertEqual(status_data["status"], "not_found")
+        self.assertEqual(status_data["confirmation_code"], code)
+
+    def test_tampered_signature_returns_403_forbidden(self):
+        """
+        Modifying any byte of the signature must cause HMAC comparison failure
+        and return HTTP 403 signature_mismatch.
+        """
+        valid_signed_req = _make_signed_request({"user_id": "TAMPER_USER"})
+        sig_part, payload_part = valid_signed_req.split(".", 1)
+        # Flip first character of signature
+        tampered_sig = ("A" if sig_part[0] != "A" else "B") + sig_part[1:]
+        tampered_req = f"{tampered_sig}.{payload_part}"
+
+        resp = self.client.post(
+            CALLBACK_URL, data={"signed_request": tampered_req}
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.json()["error"], "signature_mismatch")
+        self.assertFalse(
+            MetaDeletionRequest.objects.filter(facebook_user_id="TAMPER_USER").exists()
+        )
+
 
 
 
