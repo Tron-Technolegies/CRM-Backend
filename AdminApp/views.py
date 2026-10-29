@@ -931,6 +931,123 @@ def meta_status(request):
     })
 
 
+@api_view(["POST"])
+@require_permission('integration.manage')
+def meta_page_subscribe(request, page_id):
+    """
+    POST /api/admin/integrations/meta/pages/<page_id>/subscribe/
+
+    Secure endpoint for CRM administrators to manually retry or initiate
+    webhook subscription for a connected Facebook Page without disconnecting
+    and reconnecting the entire Meta integration.
+
+    Guarantees:
+      - Requires authentication and 'integration.manage' permission.
+      - Enforces strict company-level isolation (returns 404 if page does not
+        belong to request.company).
+      - Reuses subscribe_page_to_leadgen_webhook().
+      - Safely handles API errors, expired tokens, and network failures.
+      - Never exposes access tokens or app secrets in the response or logs.
+      - Persists webhook_subscription_status and webhook_subscription_error.
+    """
+    clean_page_id = str(page_id).strip()
+    if not clean_page_id:
+        return JsonResponse({"message": "Page ID is required."}, status=400)
+
+    # 1. Company-level isolation: page must belong to request.company and be active
+    page = MetaPage.objects.filter(
+        company=request.company,
+        page_id=clean_page_id,
+        is_active=True,
+    ).select_related("meta_integration").first()
+
+    if not page:
+        return JsonResponse(
+            {"message": "Page not found or not connected for this company."},
+            status=404,
+        )
+
+    # 2. Resolve page access token (page-specific or inherited from integration)
+    token = page.page_access_token
+    if not token and page.meta_integration:
+        token = page.meta_integration.page_access_token
+
+    if not token:
+        page.webhook_subscription_status = MetaPage.SUBSCRIPTION_NO_TOKEN
+        page.webhook_subscription_error = "no_token"
+        page.save(update_fields=["webhook_subscription_status", "webhook_subscription_error", "updated_at"])
+        return JsonResponse(
+            {
+                "success": False,
+                "status": MetaPage.SUBSCRIPTION_NO_TOKEN,
+                "error": "no_token",
+                "message": "No Page access token available to subscribe to webhooks.",
+                "page": {
+                    "id": page.id,
+                    "page_id": page.page_id,
+                    "pageId": page.page_id,
+                    "page_name": page.page_name,
+                    "pageName": page.page_name,
+                    "webhook_subscription_status": page.webhook_subscription_status,
+                    "webhookSubscriptionStatus": page.webhook_subscription_status,
+                    "webhook_subscription_error": page.webhook_subscription_error,
+                    "webhookSubscriptionError": page.webhook_subscription_error,
+                    "hasPageToken": False,
+                },
+            },
+            status=400,
+        )
+
+    # 3. Call Meta Graph API via subscribe_page_to_leadgen_webhook
+    subscription_status, subscription_error = subscribe_page_to_leadgen_webhook(
+        page_id=clean_page_id,
+        page_access_token=token,
+    )
+
+    # 4. Update and persist MetaPage status
+    page.webhook_subscription_status = subscription_status
+    page.webhook_subscription_error = subscription_error
+    page.save(update_fields=["webhook_subscription_status", "webhook_subscription_error", "updated_at"])
+
+    page_data = {
+        "id": page.id,
+        "page_id": page.page_id,
+        "pageId": page.page_id,
+        "page_name": page.page_name,
+        "pageName": page.page_name,
+        "is_active": page.is_active,
+        "isActive": page.is_active,
+        "webhook_subscription_status": page.webhook_subscription_status,
+        "webhookSubscriptionStatus": page.webhook_subscription_status,
+        "webhook_subscription_error": page.webhook_subscription_error,
+        "webhookSubscriptionError": page.webhook_subscription_error,
+        "hasPageToken": bool(page.page_access_token),
+    }
+
+    if subscription_status == MetaPage.SUBSCRIPTION_SUCCESS:
+        return JsonResponse(
+            {
+                "success": True,
+                "status": subscription_status,
+                "error": "",
+                "message": f"Successfully subscribed Page '{page.page_name or clean_page_id}' to leadgen webhooks.",
+                "page": page_data,
+            },
+            status=200,
+        )
+
+    return JsonResponse(
+        {
+            "success": False,
+            "status": subscription_status,
+            "error": subscription_error,
+            "message": f"Failed to subscribe Page to leadgen webhooks: {subscription_error}.",
+            "page": page_data,
+        },
+        status=400,
+    )
+
+
 def process_meta_lead(leadgen_id, page_id, form_id=None, ad_id=None):
     """
     Process a single Meta Leadgen event:

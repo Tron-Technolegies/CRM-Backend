@@ -9,7 +9,7 @@ from django.contrib.contenttypes.fields import GenericForeignKey
 from django.conf import settings as django_settings
 from cloudinary.models import CloudinaryField
 
-from AdminApp.crypto_utils import decrypt_value, encrypt_value
+from AdminApp.crypto_utils import decrypt_value, encrypt_value, EncryptedTextField
 
 
 class Company(models.Model):
@@ -1255,8 +1255,8 @@ class MetaIntegration(models.Model):
 
     meta_user_id = models.CharField(max_length=255, blank=True, null=True)
 
-    access_token = models.TextField()
-    page_access_token = models.TextField(blank=True, null=True)
+    access_token = EncryptedTextField()
+    page_access_token = EncryptedTextField(blank=True, null=True)
 
     business_id = models.CharField(max_length=255, blank=True, null=True)
     ad_account_id = models.CharField(max_length=255, blank=True, null=True)
@@ -1291,7 +1291,7 @@ class MetaPage(models.Model):
 
     page_id = models.CharField(max_length=255, db_index=True)
     page_name = models.CharField(max_length=255, blank=True, default="")
-    page_access_token = models.TextField(blank=True, null=True)
+    page_access_token = EncryptedTextField(blank=True, null=True)
 
     webhook_subscription_status = models.CharField(
         max_length=20,

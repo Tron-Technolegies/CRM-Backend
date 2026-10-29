@@ -2795,3 +2795,596 @@ class MetaAdsIntegrationTests(TestCase):
             HTTP_X_HUB_SIGNATURE_256=sig,
         )
         self.assertEqual(resp4.status_code, 200)
+
+    # 32. Manual Page Re-Subscription endpoint - Success
+    @patch("requests.post")
+    def test_page_subscribe_success(self, mock_post):
+        """Admin can re-subscribe a page; updates status to 'subscribed'."""
+        mock_post.return_value = MagicMock(json=lambda: {"success": True})
+        token_a = str(RefreshToken.for_user(self.user_a).access_token)
+
+        # Set status initially to failed
+        self.page_a1.webhook_subscription_status = MetaPage.SUBSCRIPTION_FAILED
+        self.page_a1.webhook_subscription_error = "token_expired"
+        self.page_a1.save()
+
+        resp = self.client.post(
+            f"/api/admin/integrations/meta/pages/{self.page_a1.page_id}/subscribe/",
+            HTTP_AUTHORIZATION=f"Bearer {token_a}"
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+
+        self.assertTrue(data["success"])
+        self.assertEqual(data["status"], MetaPage.SUBSCRIPTION_SUCCESS)
+        self.assertEqual(data["error"], "")
+        self.assertIn("Successfully subscribed", data["message"])
+        self.assertEqual(data["page"]["page_id"], self.page_a1.page_id)
+        self.assertEqual(data["page"]["webhook_subscription_status"], MetaPage.SUBSCRIPTION_SUCCESS)
+
+        # Access tokens must never be exposed
+        self.assertNotIn("access_token", data)
+        self.assertNotIn("page_access_token", data)
+        self.assertNotIn("access_token", data["page"])
+        self.assertNotIn("page_access_token", data["page"])
+
+        # Database record is updated
+        self.page_a1.refresh_from_db()
+        self.assertEqual(self.page_a1.webhook_subscription_status, MetaPage.SUBSCRIPTION_SUCCESS)
+        self.assertEqual(self.page_a1.webhook_subscription_error, "")
+
+    # 33. Page Re-Subscription - Missing Page returns 404
+    def test_page_subscribe_missing_page_returns_404(self):
+        """Requesting subscription for non-existent page returns 404."""
+        token_a = str(RefreshToken.for_user(self.user_a).access_token)
+        resp = self.client.post(
+            "/api/admin/integrations/meta/pages/non_existent_page_9999/subscribe/",
+            HTTP_AUTHORIZATION=f"Bearer {token_a}"
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    # 34. Page Re-Subscription - Cross-Company Access Blocked (returns 404)
+    def test_page_subscribe_cross_company_access_returns_404(self):
+        """Admin of Company A cannot subscribe or modify Page belonging to Company B."""
+        token_a = str(RefreshToken.for_user(self.user_a).access_token)
+
+        # page_b belongs to company_b
+        resp = self.client.post(
+            f"/api/admin/integrations/meta/pages/{self.page_b.page_id}/subscribe/",
+            HTTP_AUTHORIZATION=f"Bearer {token_a}"
+        )
+        self.assertEqual(resp.status_code, 404)
+
+        # Company B page must remain untouched
+        self.page_b.refresh_from_db()
+        self.assertEqual(self.page_b.webhook_subscription_status, MetaPage.SUBSCRIPTION_PENDING)
+
+    # 35. Page Re-Subscription - Missing Token returns 400
+    def test_page_subscribe_missing_token_returns_400(self):
+        """Page without access token cannot be subscribed; updates status to 'no_token'."""
+        token_a = str(RefreshToken.for_user(self.user_a).access_token)
+
+        self.page_a1.page_access_token = None
+        self.page_a1.save()
+        self.integration_a.page_access_token = None
+        self.integration_a.save()
+
+        resp = self.client.post(
+            f"/api/admin/integrations/meta/pages/{self.page_a1.page_id}/subscribe/",
+            HTTP_AUTHORIZATION=f"Bearer {token_a}"
+        )
+        self.assertEqual(resp.status_code, 400)
+        data = resp.json()
+        self.assertFalse(data["success"])
+        self.assertEqual(data["status"], MetaPage.SUBSCRIPTION_NO_TOKEN)
+        self.assertEqual(data["error"], "no_token")
+
+        self.page_a1.refresh_from_db()
+        self.assertEqual(self.page_a1.webhook_subscription_status, MetaPage.SUBSCRIPTION_NO_TOKEN)
+        self.assertEqual(self.page_a1.webhook_subscription_error, "no_token")
+
+    # 36. Page Re-Subscription - Insufficient Permissions returns 403
+    def test_page_subscribe_insufficient_permissions_returns_403(self):
+        """Staff with non-admin role (e.g. employee) is rejected with 403."""
+        user_emp = User.objects.create_user(username="emp_user", email="emp@test.com", password="password123")
+        Staff.objects.create(
+            user=user_emp,
+            company=self.company_a,
+            full_name="Staff Emp",
+            email="emp@test.com",
+            role="employee",
+            is_accepted=True,
+        )
+        token_emp = str(RefreshToken.for_user(user_emp).access_token)
+
+        resp = self.client.post(
+            f"/api/admin/integrations/meta/pages/{self.page_a1.page_id}/subscribe/",
+            HTTP_AUTHORIZATION=f"Bearer {token_emp}"
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    # 37. Page Re-Subscription - Unauthenticated returns 401
+    def test_page_subscribe_unauthenticated_returns_401(self):
+        """Unauthenticated request without Authorization header is rejected with 401."""
+        resp = self.client.post(
+            f"/api/admin/integrations/meta/pages/{self.page_a1.page_id}/subscribe/"
+        )
+        self.assertEqual(resp.status_code, 401)
+
+    # 38. Page Re-Subscription - Meta API Permission Denied returns 400
+    @patch("requests.post")
+    def test_page_subscribe_meta_api_permission_denied(self, mock_post):
+        """Graph API error (code 200) maps safely to 'permission_denied'."""
+        mock_post.return_value = MagicMock(
+            json=lambda: {"error": {"code": 200, "message": "(#200) The user is not allowed to manage subscriptions."}}
+        )
+        token_a = str(RefreshToken.for_user(self.user_a).access_token)
+
+        resp = self.client.post(
+            f"/api/admin/integrations/meta/pages/{self.page_a1.page_id}/subscribe/",
+            HTTP_AUTHORIZATION=f"Bearer {token_a}"
+        )
+        self.assertEqual(resp.status_code, 400)
+        data = resp.json()
+        self.assertFalse(data["success"])
+        self.assertEqual(data["status"], MetaPage.SUBSCRIPTION_FAILED)
+        self.assertEqual(data["error"], "permission_denied")
+
+        self.page_a1.refresh_from_db()
+        self.assertEqual(self.page_a1.webhook_subscription_status, MetaPage.SUBSCRIPTION_FAILED)
+        self.assertEqual(self.page_a1.webhook_subscription_error, "permission_denied")
+
+    # 39. Page Re-Subscription - Meta API Token Expired returns 400
+    @patch("requests.post")
+    def test_page_subscribe_meta_api_token_expired(self, mock_post):
+        """Graph API error 190 maps safely to 'token_expired'."""
+        mock_post.return_value = MagicMock(
+            json=lambda: {"error": {"code": 190, "message": "Invalid OAuth access token."}}
+        )
+        token_a = str(RefreshToken.for_user(self.user_a).access_token)
+
+        resp = self.client.post(
+            f"/api/admin/integrations/meta/pages/{self.page_a1.page_id}/subscribe/",
+            HTTP_AUTHORIZATION=f"Bearer {token_a}"
+        )
+        self.assertEqual(resp.status_code, 400)
+        data = resp.json()
+        self.assertFalse(data["success"])
+        self.assertEqual(data["status"], MetaPage.SUBSCRIPTION_FAILED)
+        self.assertEqual(data["error"], "token_expired")
+
+        self.page_a1.refresh_from_db()
+        self.assertEqual(self.page_a1.webhook_subscription_status, MetaPage.SUBSCRIPTION_FAILED)
+        self.assertEqual(self.page_a1.webhook_subscription_error, "token_expired")
+
+    # 40. Page Re-Subscription - Network Failure returns 400
+    @patch("requests.post")
+    def test_page_subscribe_network_failure(self, mock_post):
+        """Network exception maps safely to 'network_error' without raising unhandled exception."""
+        import requests
+        mock_post.side_effect = requests.RequestException("Meta Graph API timeout")
+        token_a = str(RefreshToken.for_user(self.user_a).access_token)
+
+        resp = self.client.post(
+            f"/api/admin/integrations/meta/pages/{self.page_a1.page_id}/subscribe/",
+            HTTP_AUTHORIZATION=f"Bearer {token_a}"
+        )
+        self.assertEqual(resp.status_code, 400)
+        data = resp.json()
+        self.assertFalse(data["success"])
+        self.assertEqual(data["status"], MetaPage.SUBSCRIPTION_FAILED)
+        self.assertEqual(data["error"], "network_error")
+
+        self.page_a1.refresh_from_db()
+        self.assertEqual(self.page_a1.webhook_subscription_status, MetaPage.SUBSCRIPTION_FAILED)
+        self.assertEqual(self.page_a1.webhook_subscription_error, "network_error")
+
+
+# ---------------------------------------------------------------------------
+# Token Encryption Tests
+# ---------------------------------------------------------------------------
+from cryptography.fernet import Fernet, InvalidToken as FernetInvalidToken
+from AdminApp.crypto_utils import (
+    encrypt_token,
+    decrypt_token,
+    is_encrypted_token,
+    EncryptedTextField,
+)
+
+
+class MetaTokenEncryptionTests(TestCase):
+    """
+    Comprehensive tests for Meta access-token encryption at rest.
+
+    Covers:
+    - encrypt_token / decrypt_token / is_encrypted_token helpers
+    - EncryptedTextField transparent round-trip via MetaIntegration and MetaPage
+    - Legacy plaintext backward-compatibility
+    - Double-encrypt prevention
+    - None / empty string edge cases
+    - Missing FIELD_ENCRYPTION_KEY safety
+    - Multi-tenant isolation (tokens cannot leak across companies)
+    """
+
+    # ------------------------------------------------------------------ #
+    # Fixtures                                                             #
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def _valid_key(cls):
+        """Generate a fresh, valid Fernet key for test overrides."""
+        return Fernet.generate_key().decode()
+
+    def setUp(self):
+        self.test_key = self._valid_key()
+        self.company_a = Company.objects.create(name="Enc Company A", email="enc_a@test.com")
+        self.company_b = Company.objects.create(name="Enc Company B", email="enc_b@test.com")
+        self.user_a = User.objects.create_user(username="enc_usera", password="pw123")
+        self.staff_a = Staff.objects.create(
+            user=self.user_a,
+            company=self.company_a,
+            full_name="Enc Staff A",
+            email="enc_usera@test.com",
+            role="admin",
+            is_accepted=True,
+        )
+
+    # ------------------------------------------------------------------ #
+    # 1. encrypt_token helper                                              #
+    # ------------------------------------------------------------------ #
+
+    def test_encrypt_token_raises_when_key_missing(self):
+        """encrypt_token must raise ValueError when FIELD_ENCRYPTION_KEY is absent."""
+        import os
+        env_backup = os.environ.pop("FIELD_ENCRYPTION_KEY", None)
+        try:
+            with override_settings(FIELD_ENCRYPTION_KEY=None):
+                with self.assertRaises(ValueError):
+                    encrypt_token("plain_token")
+        finally:
+            if env_backup is not None:
+                os.environ["FIELD_ENCRYPTION_KEY"] = env_backup
+
+    def test_encrypt_token_returns_fernet_ciphertext(self):
+        """encrypt_token must return a Fernet ciphertext starting with 'gAAAAA'."""
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            ct = encrypt_token("EAAB_plaintext_token")
+        self.assertTrue(ct.startswith("gAAAAA"), f"Expected Fernet prefix, got: {ct[:10]}")
+
+    def test_encrypt_token_none_returns_none(self):
+        """encrypt_token(None) must return None, not raise."""
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            self.assertIsNone(encrypt_token(None))
+
+    def test_encrypt_token_empty_string_returns_empty(self):
+        """encrypt_token('') must return '' without encrypting."""
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            self.assertEqual(encrypt_token(""), "")
+
+    def test_encrypt_token_idempotent_on_already_encrypted(self):
+        """Calling encrypt_token on an already-encrypted ciphertext must not double-encrypt."""
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            ct1 = encrypt_token("EAAB_original")
+            ct2 = encrypt_token(ct1)
+        self.assertEqual(ct1, ct2)
+
+    def test_encrypt_token_different_plaintexts_produce_different_ciphertexts(self):
+        """Two different plaintexts must produce distinct ciphertexts."""
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            ct_a = encrypt_token("token_alpha")
+            ct_b = encrypt_token("token_beta")
+        self.assertNotEqual(ct_a, ct_b)
+
+    # ------------------------------------------------------------------ #
+    # 2. decrypt_token helper                                              #
+    # ------------------------------------------------------------------ #
+
+    def test_decrypt_token_roundtrip(self):
+        """decrypt_token(encrypt_token(x)) must return x unchanged."""
+        raw = "EAAB_secret_page_token_abc123"
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            ct = encrypt_token(raw)
+            result = decrypt_token(ct)
+        self.assertEqual(result, raw)
+
+    def test_decrypt_token_none_returns_none(self):
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            self.assertIsNone(decrypt_token(None))
+
+    def test_decrypt_token_empty_string_returns_empty(self):
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            self.assertEqual(decrypt_token(""), "")
+
+    def test_decrypt_token_legacy_plaintext_returned_as_is(self):
+        """Legacy plaintext tokens (no 'gAAAAA' prefix) must be returned as-is (fallback)."""
+        legacy = "EAAB_legacy_plain_token"
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            result = decrypt_token(legacy)
+        self.assertEqual(result, legacy)
+
+    def test_decrypt_token_corrupted_ciphertext_raises_invalid_token(self):
+        """A string starting with 'gAAAAA' but otherwise corrupt must raise InvalidToken."""
+        corrupted = "gAAAAA" + "X" * 60
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            with self.assertRaises(FernetInvalidToken):
+                decrypt_token(corrupted)
+
+    # ------------------------------------------------------------------ #
+    # 3. is_encrypted_token helper                                         #
+    # ------------------------------------------------------------------ #
+
+    def test_is_encrypted_token_true_for_valid_ciphertext(self):
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            ct = encrypt_token("check_me")
+            self.assertTrue(is_encrypted_token(ct))
+
+    def test_is_encrypted_token_false_for_plaintext(self):
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            self.assertFalse(is_encrypted_token("EAAB_plain"))
+
+    def test_is_encrypted_token_false_for_none(self):
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            self.assertFalse(is_encrypted_token(None))
+
+    def test_is_encrypted_token_false_for_empty(self):
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            self.assertFalse(is_encrypted_token(""))
+
+    def test_is_encrypted_token_false_for_invalid_gaaaaa_prefix(self):
+        """String starting with 'gAAAAA' but not valid ciphertext must return False."""
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            self.assertFalse(is_encrypted_token("gAAAAA_invalid_garbage"))
+
+    # ------------------------------------------------------------------ #
+    # 4. EncryptedTextField — MetaIntegration model round-trip            #
+    # ------------------------------------------------------------------ #
+
+    def test_meta_integration_access_token_stored_encrypted(self):
+        """MetaIntegration.access_token must be stored as ciphertext in the DB."""
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            integration = MetaIntegration.objects.create(
+                company=self.company_a,
+                meta_user_id="enc_usr_001",
+                access_token="EAAB_user_token_plain",
+                ad_account_id="act_enc_001",
+                assigned_staff=self.staff_a,
+                is_active=True,
+            )
+            from django.db import connection
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT access_token FROM adminapp_metaintegration WHERE id = %s",
+                    [integration.id],
+                )
+                raw_db_value = cursor.fetchone()[0]
+
+        self.assertNotEqual(raw_db_value, "EAAB_user_token_plain")
+        self.assertTrue(raw_db_value.startswith("gAAAAA"), f"DB value not encrypted: {raw_db_value[:20]}")
+
+    def test_meta_integration_access_token_decrypted_on_read(self):
+        """Reading MetaIntegration.access_token must return the original plaintext."""
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            integration = MetaIntegration.objects.create(
+                company=self.company_a,
+                meta_user_id="enc_usr_002",
+                access_token="EAAB_user_token_readable",
+                ad_account_id="act_enc_002",
+                assigned_staff=self.staff_a,
+                is_active=True,
+            )
+            refreshed = MetaIntegration.objects.get(pk=integration.pk)
+            self.assertEqual(refreshed.access_token, "EAAB_user_token_readable")
+
+    def test_meta_integration_page_access_token_encrypted_and_decrypted(self):
+        """MetaIntegration.page_access_token round-trip via EncryptedTextField."""
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            integration = MetaIntegration.objects.create(
+                company=self.company_a,
+                meta_user_id="enc_usr_003",
+                access_token="EAAB_token_003",
+                page_access_token="EAAB_page_token_003",
+                ad_account_id="act_enc_003",
+                assigned_staff=self.staff_a,
+                is_active=True,
+            )
+            refreshed = MetaIntegration.objects.get(pk=integration.pk)
+            self.assertEqual(refreshed.page_access_token, "EAAB_page_token_003")
+
+    def test_meta_integration_null_page_access_token_stored_as_null(self):
+        """Null page_access_token must remain NULL in the DB and decrypt to None."""
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            integration = MetaIntegration.objects.create(
+                company=self.company_a,
+                meta_user_id="enc_usr_004",
+                access_token="EAAB_token_004",
+                page_access_token=None,
+                ad_account_id="act_enc_004",
+                assigned_staff=self.staff_a,
+                is_active=True,
+            )
+            refreshed = MetaIntegration.objects.get(pk=integration.pk)
+            self.assertIsNone(refreshed.page_access_token)
+
+    # ------------------------------------------------------------------ #
+    # 5. EncryptedTextField — MetaPage model round-trip                   #
+    # ------------------------------------------------------------------ #
+
+    def test_metapage_page_access_token_stored_encrypted(self):
+        """MetaPage.page_access_token must be stored as ciphertext."""
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            integration = MetaIntegration.objects.create(
+                company=self.company_a,
+                meta_user_id="enc_usr_005",
+                access_token="EAAB_token_005",
+                assigned_staff=self.staff_a,
+                is_active=True,
+            )
+            page = MetaPage.objects.create(
+                company=self.company_a,
+                meta_integration=integration,
+                page_id="enc_page_005",
+                page_name="Enc Test Page",
+                page_access_token="EAAB_enc_page_tok_005",
+                is_active=True,
+            )
+            from django.db import connection
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT page_access_token FROM adminapp_metapage WHERE id = %s",
+                    [page.id],
+                )
+                raw_db_value = cursor.fetchone()[0]
+
+        self.assertNotEqual(raw_db_value, "EAAB_enc_page_tok_005")
+        self.assertTrue(raw_db_value.startswith("gAAAAA"))
+
+    def test_metapage_page_access_token_decrypted_on_read(self):
+        """Reading MetaPage.page_access_token must return the original plaintext."""
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            integration = MetaIntegration.objects.create(
+                company=self.company_a,
+                meta_user_id="enc_usr_006",
+                access_token="EAAB_token_006",
+                assigned_staff=self.staff_a,
+                is_active=True,
+            )
+            page = MetaPage.objects.create(
+                company=self.company_a,
+                meta_integration=integration,
+                page_id="enc_page_006",
+                page_name="Enc Test Page 2",
+                page_access_token="EAAB_enc_page_tok_006",
+                is_active=True,
+            )
+            refreshed = MetaPage.objects.get(pk=page.pk)
+            self.assertEqual(refreshed.page_access_token, "EAAB_enc_page_tok_006")
+
+    def test_metapage_null_page_access_token_stored_as_null(self):
+        """Null MetaPage.page_access_token stays NULL in the DB."""
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            integration = MetaIntegration.objects.create(
+                company=self.company_a,
+                meta_user_id="enc_usr_007",
+                access_token="EAAB_token_007",
+                assigned_staff=self.staff_a,
+                is_active=True,
+            )
+            page = MetaPage.objects.create(
+                company=self.company_a,
+                meta_integration=integration,
+                page_id="enc_page_007",
+                page_name="No Token Page",
+                page_access_token=None,
+                is_active=True,
+            )
+            refreshed = MetaPage.objects.get(pk=page.pk)
+            self.assertIsNone(refreshed.page_access_token)
+
+    # ------------------------------------------------------------------ #
+    # 6. Legacy plaintext backward-compatibility via model                #
+    # ------------------------------------------------------------------ #
+
+    def test_legacy_plaintext_token_readable_after_migration(self):
+        """
+        Rows inserted before encryption was deployed contain plaintext.
+        from_db_value / decrypt_token must return the plaintext as-is (fallback).
+        """
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            integration = MetaIntegration.objects.create(
+                company=self.company_a,
+                meta_user_id="enc_usr_legacy",
+                access_token="EAAB_token_legacy",
+                assigned_staff=self.staff_a,
+                is_active=True,
+            )
+            from django.db import connection
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE adminapp_metaintegration SET access_token = %s WHERE id = %s",
+                    ["EAAB_legacy_plain", integration.id],
+                )
+            refreshed = MetaIntegration.objects.get(pk=integration.pk)
+            self.assertEqual(refreshed.access_token, "EAAB_legacy_plain")
+
+    # ------------------------------------------------------------------ #
+    # 7. Update token — re-encrypt on save                                #
+    # ------------------------------------------------------------------ #
+
+    def test_updating_token_re_encrypts(self):
+        """Updating a token via .save() must encrypt the new value."""
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            integration = MetaIntegration.objects.create(
+                company=self.company_a,
+                meta_user_id="enc_usr_update",
+                access_token="EAAB_original_token",
+                assigned_staff=self.staff_a,
+                is_active=True,
+            )
+            integration.access_token = "EAAB_new_token"
+            integration.save(update_fields=["access_token"])
+
+            refreshed = MetaIntegration.objects.get(pk=integration.pk)
+            self.assertEqual(refreshed.access_token, "EAAB_new_token")
+
+            from django.db import connection
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT access_token FROM adminapp_metaintegration WHERE id = %s",
+                    [integration.id],
+                )
+                raw = cursor.fetchone()[0]
+            self.assertTrue(raw.startswith("gAAAAA"))
+            self.assertNotEqual(raw, "EAAB_new_token")
+
+    # ------------------------------------------------------------------ #
+    # 8. Multi-tenant isolation — tokens cannot leak across companies     #
+    # ------------------------------------------------------------------ #
+
+    def test_token_multi_tenant_isolation(self):
+        """Company A's token must not be readable or writable from Company B's records."""
+        user_b = User.objects.create_user(username="enc_userb", password="pw123")
+        staff_b = Staff.objects.create(
+            user=user_b,
+            company=self.company_b,
+            full_name="Enc Staff B",
+            email="enc_userb@test.com",
+            role="admin",
+            is_accepted=True,
+        )
+
+        with override_settings(FIELD_ENCRYPTION_KEY=self.test_key):
+            int_a = MetaIntegration.objects.create(
+                company=self.company_a,
+                meta_user_id="enc_mt_a",
+                access_token="TOKEN_COMPANY_A",
+                assigned_staff=self.staff_a,
+                is_active=True,
+            )
+            int_b = MetaIntegration.objects.create(
+                company=self.company_b,
+                meta_user_id="enc_mt_b",
+                access_token="TOKEN_COMPANY_B",
+                assigned_staff=staff_b,
+                is_active=True,
+            )
+            fetched_a = MetaIntegration.objects.get(pk=int_a.pk)
+            fetched_b = MetaIntegration.objects.get(pk=int_b.pk)
+
+        self.assertEqual(fetched_a.access_token, "TOKEN_COMPANY_A")
+        self.assertEqual(fetched_b.access_token, "TOKEN_COMPANY_B")
+        self.assertNotEqual(fetched_a.access_token, fetched_b.access_token)
+
+    # ------------------------------------------------------------------ #
+    # 9. EncryptedTextField.deconstruct — migration compatibility          #
+    # ------------------------------------------------------------------ #
+
+    def test_encrypted_text_field_deconstruct_produces_no_extra_kwargs(self):
+        """
+        EncryptedTextField.deconstruct() must not introduce extra kwargs that
+        would confuse Django's migration framework.
+        """
+        field = EncryptedTextField(blank=True, null=True)
+        name, path, args, kwargs = field.deconstruct()
+        self.assertIn("EncryptedTextField", path)
+        self.assertIn("blank", kwargs)
+        self.assertIn("null", kwargs)

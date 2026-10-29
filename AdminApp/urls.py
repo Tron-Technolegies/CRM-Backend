@@ -165,6 +165,8 @@ urlpatterns= [
     path('webhooks/meta/', views.meta_webhook, name='meta-webhook'),
     path('webhooks/meta', views.meta_webhook, name='meta-webhook-noslash'),
     path('integrations/meta/status/', views.meta_status, name='meta-status'),
+    path('integrations/meta/pages/<str:page_id>/subscribe/', views.meta_page_subscribe, name='meta-page-subscribe'),
+    path('integrations/meta/pages/<str:page_id>/subscribe', views.meta_page_subscribe, name='meta-page-subscribe-noslash'),
 
     # ── Meta Data Deletion Callback & Status (Priority 1) ─────────────────────
     # Public — no JWT required. Verified via Meta's signed_request HMAC-SHA256.
