@@ -461,7 +461,7 @@ def meta_connect(request):
         "scope": (
             "public_profile,email,"
             "ads_management,ads_read,"
-            "pages_show_list,pages_read_engagement,"
+            "pages_show_list,"
             "pages_manage_metadata,pages_manage_ads,"
             "leads_retrieval"
         ),
@@ -555,7 +555,6 @@ def retrieve_facebook_pages(access_token):
             for s in granular:
                 if s.get("scope") in [
                     "pages_show_list",
-                    "pages_read_engagement",
                     "pages_manage_metadata",
                     "pages_manage_ads",
                     "leads_retrieval",

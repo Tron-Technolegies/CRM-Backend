@@ -2745,12 +2745,12 @@ class MetaAdsIntegrationTests(TestCase):
             "ads_management",
             "ads_read",
             "pages_show_list",
-            "pages_read_engagement",
             "pages_manage_metadata",
             "pages_manage_ads",
             "leads_retrieval",
         }
         self.assertTrue(required_scopes.issubset(scopes))
+        self.assertNotIn("pages_read_engagement", scopes)
         self.assertIn("pages_manage_metadata", scopes)
 
         # Verify state is valid and unpacks to company_a
